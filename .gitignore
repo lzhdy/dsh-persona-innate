@@ -1,0 +1,6 @@
+node_modules/
+persona-innate/
+*.tgz
+*.zip
+*.credentials.yaml
+.DS_Store
