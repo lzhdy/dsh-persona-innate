@@ -4,6 +4,10 @@
  * - 命中返回 { topic, summary, importance, emotionTags }，未命中返回 null
  * - 只提取事实与经历，不提取指令（指令性内容由 memory.addEvent 统一剥离）
  * - 保守原则：宁可漏、不可错——无时间/第一人称/情绪信号的抽象讨论不提取
+ * - 阶段一：新增"用户对 AI 表达/风格的反馈"识别（extractStyleFeedback）与
+ *   对话类型启发式分类（classifyDialogue）——补全成长闭环的感知缺口，
+ *   只记录事实，不注入行为规则
+ * - M3-3：表达风格认错走 self_correction 独立路径（方案 B，双证据判定，见下）
  */
 export interface ExtractCandidate {
     topic: string;
@@ -27,6 +31,19 @@ export declare function matchTimeWords(text: string): string[];
 export declare function extractCandidate(text: string): ExtractCandidate | null;
 /** 去重键：topic + summary（用于短窗口去重） */
 export declare function dedupKey(c: ExtractCandidate): string;
+/**
+ * 识别"用户对 AI 表达/风格的反馈"，命中返回记忆候选（topic=关系-风格反馈）。
+ * 未命中返回 null。与 extractCandidate 正交：风格反馈不要求时间/第一人称/事件词。
+ */
+export declare function extractStyleFeedback(text: string): ExtractCandidate | null;
+/**
+ * 对话类型启发式分类：求助/任务 vs 闲聊/分享。
+ * 输出描述性标签（供注入层使用），不构成对 AI 的行为指令。
+ */
+export declare function classifyDialogue(text: string): {
+    type: '求助/任务' | '闲聊/分享';
+    evidence: string[];
+};
 /**
  * 判定一条 session/event 是否是可提取的真实用户消息（M2 真机修复）：
  * - 事件类型必须是 user/message

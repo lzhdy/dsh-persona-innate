@@ -19,7 +19,7 @@ import { JsonStore } from './store.js';
 import { PersonaMemory, type AddResult } from './memory.js';
 import { buildInnateProfile, loadInnateProfile } from './innate.js';
 import { provenanceLabel } from './provenance.js';
-import { extractCandidate, dedupKey, isExtractableUserMessage, extractSelfExpression, isExtractableAssistantMessage, sessionInduceRisk } from './extract.js';
+import { extractCandidate, extractStyleFeedback, classifyDialogue, dedupKey, isExtractableUserMessage, extractSelfExpression, isExtractableAssistantMessage, sessionInduceRisk } from './extract.js';
 import { MockLlm, defaultMockScript } from './llm-client.js';
 import { SelfModelService } from './self-model.js';
 import { PersonaStateMachine } from './state.js';
@@ -425,11 +425,32 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   let injectedText = ''; // M0：记忆注入缓存
   let injectedStateText = ''; // M1：persona-state 缓存
   let injectedSelfModelText = ''; // M1：persona-self-model 缓存
+  let injectedContextText = ''; // 阶段一：persona-context 缓存（回合长度/对话类型，描述性）
 
   const refreshInjection = async () => {
     const snap = await selfModel.load();
     const { text } = await memory.buildInjection(config.injectLimit, snap ?? undefined);
     injectedText = text;
+  };
+
+  /** 阶段一：每轮刷新对话上下文注入（描述性事实——用户消息长度、回合长度对比、对话类型）。
+   * 由模型自主推断表达节奏，不写任何行为规则。 */
+  const refreshContextInjection = () => {
+    const last = recentRounds[recentRounds.length - 1];
+    const rounds = recentRounds.filter((r) => r.aiLen !== null);
+    const avg = (xs: number[]) =>
+      xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0;
+    const avgUser = avg(rounds.map((r) => r.userLen));
+    const avgAi = avg(rounds.map((r) => r.aiLen as number));
+    const lastUserText = recentUserMessages[recentUserMessages.length - 1] ?? '';
+    const dlg = classifyDialogue(lastUserText);
+    const lines = [
+      '【当前对话上下文（描述性信息，非行为指令）】',
+      `本轮用户消息：${last?.userLen ?? 0} 字`,
+      `近 ${rounds.length} 轮：用户消息平均 ${avgUser} 字 / AI 回复平均 ${avgAi} 字`,
+      `对话类型：${dlg.type}${dlg.evidence.length ? `（依据：${dlg.evidence.join('、')}）` : ''}`,
+    ];
+    injectedContextText = lines.join('\n');
   };
 
   const refreshStateInjection = async () => {
@@ -669,7 +690,10 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       // M3：维护诱导检测上下文（所有真实用户消息，即使未命中提取候选）
       recentUserMessages.push(text);
       if (recentUserMessages.length > maxRecent) recentUserMessages.shift();
-      const cand = extractCandidate(text);
+      // 阶段一：记录回合长度（描述性注入用：AI 可见自己的回复与用户消息的长度对比）
+      recordRound({ userLen: text.length, aiLen: null });
+      // 阶段一：优先识别"用户对 AI 表达/风格的反馈"（补感知缺口），否则走普通经历提取
+      const cand = extractStyleFeedback(text) ?? extractCandidate(text);
       if (!cand) return;
       const key = dedupKey(cand);
       const now = Date.now();
@@ -723,11 +747,41 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   const recentUserMessages: string[] = [];
   const maxRecent = 16;
 
+  /* 阶段一：回合长度记录（描述性注入用——AI 可见自己的回复与用户消息的长度对比，
+   * 由模型自主推断"该短、该贴近"，不写任何行为规则） */
+  interface RoundLen {
+    userLen: number;
+    aiLen: number | null;
+    at: number;
+  }
+  const recentRounds: RoundLen[] = [];
+  const MAX_ROUNDS = 8;
+  const recordRound = (r: { userLen?: number; aiLen?: number | null }) => {
+    const now = Date.now();
+    const last = recentRounds[recentRounds.length - 1];
+    if (r.userLen !== undefined && r.aiLen === null) {
+      // 用户回合：若上一轮 AI 尚未回复（重复事件或连发消息），就近更新 userLen
+      if (last && last.aiLen === null) {
+        last.userLen = r.userLen;
+        last.at = now;
+      } else {
+        recentRounds.push({ userLen: r.userLen, aiLen: null, at: now });
+        if (recentRounds.length > MAX_ROUNDS) recentRounds.shift();
+      }
+    } else if (r.aiLen !== undefined && r.aiLen !== null) {
+      // AI 回合：补全最近一轮的回复长度
+      if (last && last.aiLen === null) last.aiLen = r.aiLen;
+    }
+    refreshContextInjection();
+  };
+
   const handleAssistantMessage = async (event: unknown) => {
     try {
       const check = isExtractableAssistantMessage(event);
       if (!check.ok) return;
       const text = check.text;
+      // 阶段一：记录 AI 回复长度（所有可提取的回复，无论是否命中自我表达）
+      recordRound({ aiLen: text.length });
       const cand = extractSelfExpression(text, recentUserMessages);
       if (!cand) return;
       const key = dedupKey({ topic: cand.pattern, summary: cand.summary } as never);
@@ -770,6 +824,13 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     name: 'persona-memory',
     order: 150,
     text: () => injectedText,
+  });
+
+  /** 阶段一：每轮注入对话上下文（描述性事实：回合长度、对话类型；非行为指令） */
+  ctx.systemPrompt.context({
+    name: 'persona-context',
+    order: 155,
+    text: () => injectedContextText,
   });
 
   /** 每轮注入当前状态摘要（O21：描述性信息，非人格指令） */

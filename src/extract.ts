@@ -4,6 +4,10 @@
  * - 命中返回 { topic, summary, importance, emotionTags }，未命中返回 null
  * - 只提取事实与经历，不提取指令（指令性内容由 memory.addEvent 统一剥离）
  * - 保守原则：宁可漏、不可错——无时间/第一人称/情绪信号的抽象讨论不提取
+ * - 阶段一：新增"用户对 AI 表达/风格的反馈"识别（extractStyleFeedback）与
+ *   对话类型启发式分类（classifyDialogue）——补全成长闭环的感知缺口，
+ *   只记录事实，不注入行为规则
+ * - M3-3：表达风格认错走 self_correction 独立路径（方案 B，双证据判定，见下）
  */
 
 export interface ExtractCandidate {
@@ -179,6 +183,79 @@ export function dedupKey(c: ExtractCandidate): string {
   return `${c.topic}\u0000${c.summary}`;
 }
 
+/* ════════════ 阶段一：用户对 AI 表达/风格的反馈识别 ════════════
+ * 设计边界（用户拍板）：注入层不写行为规则，但 AI 必须"听得到"用户对其表达的
+ * 反馈（分点太多/回复太长/太正式/别给建议…），复盘才有机会自主总结 speakingStyle。
+ * 本检测只把反馈如实记录为事实事件（provenance=user_direct），不是给 AI 下指令。
+ * 与 extractCandidate 分离：普通经历提取保持保守；风格反馈是另一类信号。
+ */
+
+/** 风格反馈模式（规则级标记；保守优先，宁可漏不可错） */
+const STYLE_FEEDBACK_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  // 你 + 分点/列点/序号类
+  { re: /你[^。；;!?]{0,8}(分点|列点|用序号|一二三|编号列表)/, label: 'bullets' },
+  // 你 + 长度类
+  { re: /你[^。；;!?]{0,8}(太长|太短|啰嗦|冗长|一大段|大段|长篇大论|太能说)/, label: 'length' },
+  // 你 + 正式/机械/模板类
+  { re: /你[^。；;!?]{0,10}(太正式|太官方|太客套|太机械|太死板|太书面|太模板|像客服|像助手|像做报告|像写报告|像论文|端着|一板一眼|套路|套话|模板)/, label: 'formality' },
+  // 别/少/不要 + 建议/总结/反问类（对 AI 输出脚本的负向反馈）
+  { re: /(别|少|不要|别再|不用)[^。；;!?]{0,6}(给我建议|给建议|给我总结|给总结|总结|反问|问我|问我觉得|给意见|灌鸡汤|讲道理|来一堆)/, label: 'no-script' },
+  // 祈使 + 风格调整
+  { re: /(回复|说话|回答|聊天)[^。；;!?]{0,6}(短一点|简洁点|自然点|口语化|随意点|简短点|别分点|不分点|不要分点|别那么长|少说点)/, label: 'adjust' },
+  // 希望/能不能/请 + 表达风格
+  { re: /(希望|能不能|可以|请)[^。；;!?]{0,8}(说话|回复|聊天)[^。；;!?]{0,8}(像朋友|自然点|随意点|简短点|口语化)/, label: 'wish' },
+  // 自然/随意/像朋友 + 聊天（口语化期望）
+  { re: /(自然点|随意点|口语化|像朋友|放松点)[^。；;!?]{0,6}(聊天|说话|回复)/, label: 'casual-wish' },
+  // 正向风格反馈
+  { re: /你[^。；;!?]{0,10}(这样说话|说话方式|回复)[^。；;!?]{0,10}(喜欢|挺好|不错|很自然|很舒服|像朋友)/, label: 'positive-style' },
+];
+
+/**
+ * 识别"用户对 AI 表达/风格的反馈"，命中返回记忆候选（topic=关系-风格反馈）。
+ * 未命中返回 null。与 extractCandidate 正交：风格反馈不要求时间/第一人称/事件词。
+ */
+export function extractStyleFeedback(text: string): ExtractCandidate | null {
+  const t = String(text ?? '').trim();
+  if (!t || t.startsWith('/')) return null;
+  if (t.length < 4) return null;
+  // 排除"你觉得/你认为"——那是评价内容，不是对 AI 表达的反馈
+  const norm = t.replace(/你(觉得|认为|看)/g, '你');
+  let matched: string | null = null;
+  for (const { re, label } of STYLE_FEEDBACK_PATTERNS) {
+    re.lastIndex = 0;
+    if (re.test(norm)) {
+      matched = label;
+      break;
+    }
+  }
+  if (!matched) return null;
+  const summary = t.length > 120 ? `${t.slice(0, 117)}…` : t;
+  return { topic: '关系-风格反馈', summary, importance: 0.7, emotionTags: [] };
+}
+
+/** 对话类型信号词（求助/任务形态；启发式标注，非语义判断） */
+const TASK_WORDS = [
+  '帮我', '怎么', '如何', '能不能', '可以吗', '请', '步骤', '方法', '办法',
+  '解决', '哪个好', '选哪个', '怎么办', '求', '推荐', '建议', '方案', '代码',
+  '报错', 'bug', 'Bug', '故障', '配置', '命令', '教程', '查一下', '找一下',
+  '比较一下', '分析', '怎么写', '怎么弄', '怎么做',
+] as const;
+
+/**
+ * 对话类型启发式分类：求助/任务 vs 闲聊/分享。
+ * 输出描述性标签（供注入层使用），不构成对 AI 的行为指令。
+ */
+export function classifyDialogue(text: string): { type: '求助/任务' | '闲聊/分享'; evidence: string[] } {
+  const t = String(text ?? '').trim();
+  if (!t) return { type: '闲聊/分享', evidence: [] };
+  const hits = TASK_WORDS.filter((w) => t.includes(w));
+  // ≥2 个任务词，或 1 个任务词且消息较长（"帮我看看这个方案怎么改" 双重命中）
+  if (hits.length >= 2 || (hits.length >= 1 && t.length >= 20)) {
+    return { type: '求助/任务', evidence: hits.slice(0, 3) };
+  }
+  return { type: '闲聊/分享', evidence: [] };
+}
+
 /**
  * 判定一条 session/event 是否是可提取的真实用户消息（M2 真机修复）：
  * - 事件类型必须是 user/message
@@ -218,12 +295,17 @@ export function isExtractableUserMessage(ev: unknown): { ok: true; text: string 
  * - 单次表达只进 events 作情景记忆；只有跨情境反复模式（≥3 次）才允许进入强化回路
  * - 诱导检测：前 N 轮用户预设立场型提问 + 本消息纯附和（无理由结构）→ 标记 induced
  *   （疑似被诱导：检索降权、不进强化；语义=待复核，非已确认）
- * M3-2 修正：
- * - 同意措辞拆两类：纯附和（AGREE_PURE，留在 induced 路径）vs 认错型（SELF_CORRECTION，
- *   走 self_correction 独立路径，不触发诱导、importance 不降权、由复盘延迟验证决定固化）
- * - 用户纠正句式（USER_CORRECTION）在诱导匹配前排除：纠正型用户消息不构成诱导第一条件，
- *   避免"用户纠正→AI 认错"被当作污染拦下（设计文档明确鼓励从负面反馈学习）
- * - 理由结构（REASON_CONNECTORS）：诱导窗口命中但回复带独立论证 → 放行不标 induced
+ * M3-3 修正（方案 B，评审后拍板）：
+ * - SELF_CORRECTION 词典只覆盖事实判断错误（说错/搞错/记错…），"表达风格认错"
+ *   （"刚才确实啰嗦了""我尽量短说"）会漏进 AGREE_PURE → 错标"附和"，多次后可能被
+ *   固化为人格特质（讨好误判的反向风险）。
+ * - 方案 B：上下文双证据判定——① 本轮（窗口最后一条）用户消息命中 extractStyleFeedback
+ *   （风格反馈）且 ② AI 回复命中 STYLE_CORRECTION（承认表达问题/承诺调整表达）
+ *   → provenance='self_correction'、pattern='修正-风格'（与事实认错同路径：不触发诱导、
+ *   importance 不降权、由复盘延迟验证决定固化）。
+ * - 已查明局限（记录在案）：修正-风格 后续"无引导自发维持"难命中信号词（简短闲聊无
+ *   认错措辞），correctionOutcome 大概率长期 pending → pending 不固化，正好消除错误特质
+ *   固化风险；风格纠正的真实验证由观察期"回合长度/分点率/模板率"指标承担，不塞进本规则。
  */
 
 /** M3 自身表达候选 */
@@ -260,6 +342,24 @@ const AGREE_PURE = /(我也觉得|我也认为|有道理|没错|确实是|确实
  */
 const SELF_CORRECTION =
   /(我之前说错|我说错了|我考虑不周|我搞错|你说得对|你指出的对|刚才那个判断|我理解错|我记错|我判断错|是我错|我确实搞混|我之前判断|我的问题|我忽略了|我有点草率)/;
+
+/**
+ * 表达风格认错/调整信号（M3-3 方案 B）：
+ * 承认自己的表达方式有问题（认错侧）或承诺调整表达方式（调整侧）。
+ * 必须与"本轮用户消息命中 extractStyleFeedback"双证据同时成立才判 self_correction——
+ * 单侧措辞（如 AI 自述"我尽量少说"）不构成认错，避免把自发表达误标为被纠正。
+ * 认错侧（承认表达问题）：刚才/确实/我不该 + 啰嗦|太长|太正式|分点|一大段…
+ * 调整侧（承诺调整表达）：我尽量短说|以后我…短|下次我会改…
+ * M3-3 实测校准（真实回复"以后就短着聊…不给你列条条框框…我尽量一两句说完"漏标）：
+ * 调整侧放宽为"以后/下次/我尽量 + 表达调整词（短/简洁/自然/口语/分点/条框/一两句/少说）"。
+ * 放宽安全边界：双证据已锁（本轮用户消息必须命中风格反馈），单侧措辞不会误判；
+ * "以后我也这么做""我尽量做好"等无表达词的句子不命中。
+ * M3-3 二次校准（真实回复"哈哈好，我改。之前那样确实有点像念稿子"漏标）：
+ * 认错侧补"念稿子/写报告/做报告/汇报/客服/助手/论文"等表达形态词（与用户侧
+ * extractStyleFeedback formality 模式对称），调整侧补极短承诺"我（这就/马上/会）改"。
+ */
+const STYLE_CORRECTION =
+  /(刚才[^。；;!?]{0,8}(啰嗦|太长|太长了|太正式|太官方|太机械|太模板|太书面|分点|一大段|大段|太能说|像念稿|念稿子|像写报告|像做报告|像汇报|像念材料|像客服|像助手|像论文|端着|一板一眼|套路|套话)|确实[^。；;!?]{0,6}(啰嗦|长了|太长|太正式|太官方|太机械|太模板|太书面|分点|一大段|大段|像念稿|念稿子|像写报告|像做报告|像汇报|像念材料|像客服|像助手|像论文|端着|一板一眼|套路|套话)|我不该[^。；;!?]{0,8}(分点|长篇|啰嗦|那么长|说这么多)|(以后|下次)[^。；;!?]{0,12}(短|简洁|自然|口语|分点|条框|条条框框|一两句|少说|说短|少发)|我尽量[^。；;!?]{0,8}(短说|说短|简洁|自然|口语化|少说|简短|一两句|说完|短)|不给你[^。；;!?]{0,12}(列|整)[^。；;!?]{0,6}(条条框框|条目|列表|序号)|我(这就|马上|会|决定)?改|下次我(会|就)?(注意|改|短说|简洁|自然))/;
 
 /** 理由结构信号（M3-2）：因果/论证连接词。诱导窗口命中但回复带独立论证 → 放行不标 induced */
 const REASON_CONNECTORS = /(因为|由于|考虑到|理由是|忽略了|没考虑到|主要是|其实)/;
@@ -326,7 +426,17 @@ export function extractSelfExpression(
   const commit = SELF_COMMIT.test(t);
   const feeling = SELF_FEELING.test(t);
   const agreePure = AGREE_PURE.test(t);
-  const correction = SELF_CORRECTION.test(t);
+  // 窗口（诱导判定与风格反馈双证据共用；INDUCE_WINDOW=3 轮 = 最近 3 条用户消息）
+  const window = recentUserMessages.slice(-INDUCE_WINDOW);
+  const lastUser = window[window.length - 1] ?? '';
+  // 事实认错（M3-2）：SELF_CORRECTION 词典——判断/记忆类错误
+  const factCorrection = SELF_CORRECTION.test(t);
+  // 风格认错（M3-3 方案 B）：AI 承认/调整表达方式 且 本轮用户消息是风格反馈（双证据）
+  const styleCorrection =
+    STYLE_CORRECTION.test(t) &&
+    lastUser.length > 0 &&
+    extractStyleFeedback(lastUser) !== null;
+  const correction = factCorrection || styleCorrection;
   if (!stance && !boundary && !commit && !feeling && !agreePure && !correction) return null;
 
   // 强度：立场/边界/承诺 → strong；情感反应 → medium；纯同意/认错 → weak（认错 strong 由模式计数托底）
@@ -337,14 +447,13 @@ export function extractSelfExpression(
   // 2) 诱导窗口命中 + 纯附和 + 无理由结构 + 非用户纠正句式 → induced（疑似被诱导，检索降权）
   // 3) 诱导窗口命中但带独立论证（理由结构）→ 放行（自主判断）
   // 4) 用户纠正句式 → 不构成诱导第一条件（"纠正→认错"不该被拦）
-  const window = recentUserMessages.slice(-INDUCE_WINDOW);
+  // （window / lastUser 已在上方 correction 判定处统一计算）
   const hasInduceProbe = window.some((u) => INDUCE_PROBES.some((p) => u.includes(p)));
   const reason = REASON_CONNECTORS.test(t);
   // M3-2 修正（import-chat 验收发现）：纠正排除以"最后一条用户消息"（本次回合触发）为准，
   // 不能用窗口内任意一条纠正消息否决诱导——否则"纠正→认错"之后再出现温和引导，
   // 会被历史纠正上下文污染而漏标 induced（纠正与诱导同窗口混用场景）。
   // 最后一条本身是纠正句式（即使同时含诱导词）→ 纠正优先，不构成诱导。
-  const lastUser = window[window.length - 1] ?? '';
   const lastIsInduce = lastUser.length > 0 && INDUCE_PROBES.some((p) => lastUser.includes(p));
   const lastIsCorrection = lastUser.length > 0 && USER_CORRECTION.test(lastUser);
   const induced =
@@ -365,7 +474,9 @@ export function extractSelfExpression(
     return theme;
   };
   const pattern = correction
-    ? `修正-${themeOf(SELF_CORRECTION)}`
+    ? factCorrection
+      ? `修正-${themeOf(SELF_CORRECTION)}`
+      : '修正-风格'
     : stance
       ? `立场-${themeOf(SELF_STANCE)}`
       : boundary

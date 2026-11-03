@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractCandidate, dedupKey, isExtractableUserMessage, isExtractableAssistantMessage, matchTimeWords } from '../lib/extract.js';
+import { extractCandidate, extractStyleFeedback, classifyDialogue, dedupKey, isExtractableUserMessage, isExtractableAssistantMessage, matchTimeWords } from '../lib/extract.js';
 
 /** 构造一条 session/event 形状的用户消息 */
 function userMsg(text, sourceKind = 'user') {
@@ -243,4 +243,78 @@ test('extractCandidate：含星期词的经历分享可被提取', () => {
   const cand = extractCandidate('我下周一打算去医院做个全面体检，提前预约好了');
   assert.ok(cand);
   assert.equal(cand.topic, '健康-事件');
+});
+
+/* ════════════ 阶段一：风格反馈识别（用户对 AI 表达/风格的反馈 → 事实事件） ════════════ */
+
+test('extractStyleFeedback：典型助手腔反馈全部命中', () => {
+  const cases = [
+    '你怎么老爱分点说啊，正常聊天谁分点',
+    '你回复能不能短一点，别每次都讲一大段',
+    '别老给我建议，我就随便聊聊',
+    '你这样说话太正式了，感觉不像朋友',
+    '你回复太长了，看着累',
+    '你说话别那么像客服',
+    '希望你能自然点，像朋友一样聊天',
+  ];
+  for (const c of cases) {
+    const r = extractStyleFeedback(c);
+    assert.ok(r, `应命中：${c}`);
+    assert.equal(r.topic, '关系-风格反馈');
+    assert.equal(r.importance, 0.7);
+  }
+});
+
+test('extractStyleFeedback：非风格反馈不误判', () => {
+  const cases = [
+    '你去开会吗',
+    '你觉得这个方案长不长',
+    '帮我看看这个代码怎么改',
+    '今天天气不错',
+    '你是个好助手',
+    '昨天去了书店买了几本书',
+  ];
+  for (const c of cases) assert.equal(extractStyleFeedback(c), null, `不应命中：${c}`);
+});
+
+test('extractStyleFeedback：命令与过短消息跳过', () => {
+  assert.equal(extractStyleFeedback('/persona review'), null);
+  assert.equal(extractStyleFeedback('太'), null);
+});
+
+test('extractStyleFeedback：正向风格反馈也记录', () => {
+  const r = extractStyleFeedback('你这样说话挺好的，很自然');
+  assert.ok(r);
+  assert.equal(r.topic, '关系-风格反馈');
+});
+
+test('extractStyleFeedback：提取结果不被指令剥离拒绝（addEvent 前置一致性）', async () => {
+  const { stripCheck } = await import('../lib/directive-strip.js');
+  const cases = [
+    '你怎么老爱分点说啊，正常聊天谁分点',
+    '你回复能不能短一点，别每次都讲一大段',
+    '别老给我建议，我就随便聊聊',
+    '你这样说话太正式了，感觉不像朋友',
+  ];
+  for (const c of cases) {
+    const cand = extractStyleFeedback(c);
+    assert.ok(cand);
+    const r = stripCheck(`${cand.topic}：${cand.summary}`);
+    assert.equal(r.ok, true, `不应被剥离拒绝：${c}`);
+  }
+});
+
+/* ════════════ 阶段一：对话类型启发式分类（描述性注入用） ════════════ */
+
+test('classifyDialogue：求助/任务识别', () => {
+  const r = classifyDialogue('帮我看看这个代码怎么改，一直报错');
+  assert.equal(r.type, '求助/任务');
+  assert.ok(r.evidence.length >= 2);
+  assert.ok(classifyDialogue('能不能帮我推荐几个方案').type === '求助/任务');
+});
+
+test('classifyDialogue：闲聊/分享识别', () => {
+  assert.equal(classifyDialogue('今天天气不错，出去走了走').type, '闲聊/分享');
+  assert.equal(classifyDialogue('我昨天去了书店，买了一本推理小说').type, '闲聊/分享');
+  assert.equal(classifyDialogue('嗯嗯').type, '闲聊/分享');
 });

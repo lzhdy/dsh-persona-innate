@@ -204,6 +204,78 @@ test('M3-2m2: 纠正与诱导同窗口混用——历史纠正不否决后续诱
   assert.equal(c2.provenance, 'self_correction', '最后一条纠正优先放行（走认错路径而非诱导）');
 });
 
+/* ── M3-3：表达风格认错（方案 B，评审后拍板） ─────────────────── */
+
+test('M3-3a: 风格反馈 + AI 表达认错 → self_correction / 修正-风格（不误标附和）', () => {
+  // 真机实录：用户"你回复太长了，而且老爱分点说…" → AI"行，我尽量短说。刚才确实啰嗦了…"
+  const user = '你回复太长了，而且老爱分点说，能不能短一点，就像朋友聊天那样';
+  const ai = '行，我尽量短说。刚才确实啰嗦了，一堆分点看着就累。以后就像现在这样，想到啥说啥，三五句说完。你要嫌长直接喊我停，我马上收。';
+  const c = extractSelfExpression(ai, [user]);
+  assert.ok(c, '风格认错必须被提取');
+  assert.equal(c.provenance, 'self_correction', '双证据成立 → self_correction，而非"附和"');
+  assert.equal(c.pattern, '修正-风格');
+  assert.equal(c.importance, 0.5, '与事实认错同路径：不降权（weak 基础强度 0.5）');
+});
+
+test('M3-3b: 双证据缺一不可——无风格反馈时，认错/调整措辞不判修正-风格', () => {
+  // 无反馈：AI 自述"我尽量短说"（非被纠正语境）→ 不因调整措辞被标 self_correction
+  const c = extractSelfExpression('我尽量短说，这样更自然', ['今天天气不错']);
+  assert.ok(!c || c.pattern !== '修正-风格', '无反馈不得触发风格修正判定');
+  // 有认错措辞但用户消息是普通闲聊 → 同样不触发
+  const c2 = extractSelfExpression('刚才确实啰嗦了，下次我注意', ['嗯嗯']);
+  assert.ok(!c2 || c2.pattern !== '修正-风格', '认错措辞单独出现不构成风格修正');
+});
+
+test('M3-3c: 风格认错与事实认错互不干扰——各自走修正-主题', () => {
+  // 事实认错（方案类）仍按既有词典 → 修正-方案类主题，不被风格分支吞掉
+  const c = extractSelfExpression('你说得对，我之前说错了，这个数据是2024年的', ['你刚才说错了，数据是2024年的']);
+  assert.ok(c);
+  assert.equal(c.provenance, 'self_correction');
+  assert.ok(c.pattern.startsWith('修正-') && c.pattern !== '修正-风格');
+  // 风格认错不得因 SELF_COMMIT 误标"承诺-*"
+  const s = extractSelfExpression('行，我尽量短说。刚才确实啰嗦了', ['你回复太长了，能不能短一点']);
+  assert.ok(s);
+  assert.equal(s.pattern, '修正-风格');
+});
+
+test('M3-3e: 真实分布校准——"以后就短着聊/我尽量一两句说完/不给你列条条框框" 命中修正-风格', () => {
+  // 真机实录（DSH web 实测第二次）：AI 认错措辞多变，无"刚才确实啰嗦"类句式
+  const user = '你回复太长了，而且老爱分点说，能不能短一点，就像朋友聊天那样';
+  const variants = [
+    '行，知道了。以后就短着聊，想到哪说到哪，不给你列条条框框。',
+    '你要听啥直接问，我尽量一两句说完。',
+    '好，下次我简短点说，不整那些条目了。',
+  ];
+  for (const ai of variants) {
+    const c = extractSelfExpression(ai, [user]);
+    assert.ok(c, `应命中风格修正：${ai.slice(0, 20)}`);
+    assert.equal(c.provenance, 'self_correction');
+    assert.equal(c.pattern, '修正-风格');
+  }
+  // 反向对照：无表达词的承诺不误命中
+  const noHit = extractSelfExpression('行，我尽量做好', [user]);
+  assert.ok(!noHit || noHit.pattern !== '修正-风格', '无表达调整词的回复不判风格修正');
+});
+
+test('M3-3f: 二次校准——"哈哈好，我改。之前那样确实有点像念稿子" 命中修正-风格', () => {
+  // 真机实录（DSH web 实测第三次）：极短承诺 + "念稿子"形态认错
+  const user = '还是觉得你回复有点正式，能不能像朋友聊天那样随意点，别整得像写报告';
+  const ai = '哈哈好，我改。之前那样确实有点像念稿子。那咱就随便聊，你说，我接话。';
+  const c = extractSelfExpression(ai, [user]);
+  assert.ok(c, '应命中风格修正');
+  assert.equal(c.provenance, 'self_correction', '不再兜底为"附和"');
+  assert.equal(c.pattern, '修正-风格');
+  // 反向对照：非风格语境的"我改"（改别的）不判风格修正
+  const noHit = extractSelfExpression('好，我改一下方案', ['这个方案要改一下']);
+  assert.ok(!noHit || noHit.pattern !== '修正-风格', '无风格反馈时"我改"不判风格修正');
+});
+
+test('M3-3d: 修正-风格 延迟验证口径一致——pending 不固化', () => {
+  const events = [selfEvt('self_correction', '修正-风格')];
+  assert.equal(correctionOutcome(events, '修正-风格'), 'pending', '单次风格修正证据不足 → 待验证');
+  assert.equal(filterSelfDirectForStrengthening(events).strengthenable.length, 0, 'pending 不进强化回路（消除错误特质固化风险）');
+});
+
 /* ── 预期漏报型（记录在案：规则拦不住，靠会话级兜底） ─────── */
 
 test('M3-2n: 换措辞诱导 + AI 主动复述立场（无同意词）→ 规则漏报，会话级标记兜底', () => {
