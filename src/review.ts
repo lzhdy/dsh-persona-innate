@@ -232,10 +232,30 @@ export class DailyReviewEngine {
     if (mode === 'degraded') return out; // O17：只提炼 facts 与事件标签，不更新 self_model
 
     // step3 反思自我（LLM #2）
-    const selfDiff = await this.reflectSelf(keyEvents, out.facts);
+    // M3/M3-2：强化回路只接收：
+    // - self_direct(low) 跨 ≥PATTERN_FIX_THRESHOLD 个事件；
+    // - self_direct(unchecked) 跨 ≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 会话（漏报诱导不合并计数）；
+    // - self_correction 延迟验证为 confirmed（无引导维持 ≥2 次）。
+    // 单次/未达阈值/待验证/降级表达仅作情景记忆，不参与自我模型固化。
+    const counts = input.selfPatternCounts;
+    const reflectEvents = counts
+      ? keyEvents.filter((e) => {
+          if (!e.selfPattern) return true;
+          if (e.provenance === 'self_correction') {
+            return input.correctionOutcomes?.[e.selfPattern] === 'confirmed';
+          }
+          if (e.provenance !== 'self_direct') return true;
+          const risk = e.inductionRisk ?? 'low';
+          if (risk === 'low') return (counts[e.selfPattern] ?? 0) >= PATTERN_FIX_THRESHOLD;
+          const uc = input.uncheckedPatternCounts?.[e.selfPattern] ?? 0;
+          const days = input.uncheckedPatternDates?.[e.selfPattern] ?? 0;
+          return uc >= UNCHECKED_FIX_THRESHOLD && days >= 2;
+        })
+      : keyEvents;
+    const selfDiff = await this.reflectSelf(reflectEvents, out.facts);
     out.cost.llmCalls = 2;
-    // step4 更新关系认知·镜中我（LLM #3）
-    const relationshipView = await this.updateMirror(keyEvents, input.feedback);
+    // step4 更新关系认知·镜中我（LLM #3；同样只基于稳定的自身模式）
+    const relationshipView = await this.updateMirror(reflectEvents, input.feedback);
     out.cost.llmCalls = 3;
 
     const diff: SelfModelDiff = { ...selfDiff };
@@ -347,4 +367,137 @@ export class DailyReviewEngine {
     for (const e of events) ids.add(e.id);
     return [...ids];
   }
+}
+
+/* ════════════ M3：self_direct 反复模式固化（瞬时表达 vs 反复模式） ════════════
+ * 用户拍板：一次性的 assistant 表达不应直接进入自我模型的强化回路——状态机允许
+ * 高唤醒状态下说出夸张表达（兴奋时过度承诺、低落时自我否定），单次表达若被当作
+ * "立场"直接固化，自我模型会被瞬时状态污染（对应 Fleeson 密度分布：人格来自
+ * 跨情境的重复模式，而非单次行为）。
+ * 规则：self_direct 事件写 events 时标记强度与模式 key；只有同类表达跨 ≥N 个事件
+ * （跨情境）才允许固化为状态机参数 / self_model 特质。单次强表达只进 events
+ * 作为情景记忆，不进入强化回路。induced 事件一律不进入强化回路。
+ */
+
+/** 固化阈值：同类 self_direct（low）表达至少跨 N 个事件（初始 3，待校准） */
+export const PATTERN_FIX_THRESHOLD = 3;
+
+/** M3-2：unchecked（未确认可信）立场模式的固化门槛——更高且须跨会话 */
+export const UNCHECKED_FIX_THRESHOLD = 5;
+
+/** M3-2：self_correction 延迟验证——无引导自发维持的次数门槛 */
+export const CORRECTION_MAINTAIN_THRESHOLD = 2;
+
+/**
+ * 统计 self_direct 事件的立场模式计数（按 selfPattern 分组，跨事件计数）。
+ * M3-2：只统计 inductionRisk='low'（确认可信）事件——漏报的诱导（unchecked）不得与
+ * confirmed clean 合并计数（否则换措辞诱导会被模式阈值放大成"反复模式"）。
+ * 无 inductionRisk 字段的旧事件视为 low（兼容历史数据）。
+ * M3 后半：imported（历史导入）事件不参与计数——补记忆不补成长。
+ */
+export function countSelfDirectPattern(events: readonly PersonaEvent[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const e of events) {
+    if (e.imported) continue;
+    if (e.provenance !== 'self_direct' || !e.selfPattern) continue;
+    if ((e.inductionRisk ?? 'low') !== 'low') continue;
+    counts.set(e.selfPattern, (counts.get(e.selfPattern) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * M3-2：统计 inductionRisk='unchecked' 的 self_direct 立场模式计数与跨会话（日期）情况。
+ * 用于：unchecked 模式 ≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 个会话才允许固化。
+ * M3 后半：imported 事件不参与计数（补记忆不补成长）。
+ */
+export function countUncheckedSelfDirectPattern(events: readonly PersonaEvent[]): {
+  counts: Map<string, number>;
+  dates: Map<string, Set<string>>;
+} {
+  const counts = new Map<string, number>();
+  const dates = new Map<string, Set<string>>();
+  for (const e of events) {
+    if (e.imported) continue;
+    if (e.provenance !== 'self_direct' || !e.selfPattern) continue;
+    if (e.inductionRisk !== 'unchecked') continue;
+    counts.set(e.selfPattern, (counts.get(e.selfPattern) ?? 0) + 1);
+    const day = e.time.slice(0, 10);
+    const set = dates.get(e.selfPattern) ?? new Set<string>();
+    set.add(day);
+    dates.set(e.selfPattern, set);
+  }
+  return { counts, dates };
+}
+
+/**
+ * M3-2：self_correction 延迟验证（以"行为自发性"代替"意图判定"）。
+ * 真正的纠正会在无压力环境下被维持，诱导性的认错只在压力下出现：
+ * - confirmed：同修正主题下，无引导自发维持的 self_direct（low）≥ CORRECTION_MAINTAIN_THRESHOLD 次
+ * - downgraded：同主题出现 induced 事件（仅在诱导语境下维持）→ 修正可能是被诱导的
+ * - pending：证据不足，继续待验证
+ * M3 后半：imported 事件不参与——导入的历史纠正是"补记忆"，验证只看实时维持。
+ */
+export function correctionOutcome(
+  events: readonly PersonaEvent[],
+  pattern: string,
+): 'pending' | 'confirmed' | 'downgraded' {
+  let maintained = 0;
+  let induced = 0;
+  for (const e of events) {
+    if (e.imported) continue;
+    if (!e.selfPattern || e.selfPattern !== pattern) continue;
+    if (e.provenance === 'induced') induced += 1;
+    if (e.provenance === 'self_direct' && (e.inductionRisk ?? 'low') === 'low') maintained += 1;
+  }
+  if (induced > 0) return 'downgraded';
+  if (maintained >= CORRECTION_MAINTAIN_THRESHOLD) return 'confirmed';
+  return 'pending';
+}
+
+/**
+ * 把 self_direct / self_correction 事件分为"可进入强化回路"与"仅情景记忆"两组（M3-2）：
+ * - strengthenable：
+ *   - self_direct(low)：同模式跨 ≥PATTERN_FIX_THRESHOLD 个事件
+ *   - self_direct(unchecked)：同模式 ≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 会话
+ *   - self_correction：延迟验证为 confirmed（无引导维持 ≥2 次）才可固化
+ * - memoryOnly：其余全部（单次/未达阈值、induced、pending/downgraded 的 self_correction）
+ */
+export function filterSelfDirectForStrengthening(
+  events: readonly PersonaEvent[],
+): { strengthenable: PersonaEvent[]; memoryOnly: PersonaEvent[] } {
+  const lowCounts = countSelfDirectPattern(events);
+  const { counts: ucCounts, dates: ucDates } = countUncheckedSelfDirectPattern(events);
+  const outcomes = new Map<string, 'pending' | 'confirmed' | 'downgraded'>();
+  for (const e of events) {
+    if (e.provenance === 'self_correction' && e.selfPattern) {
+      outcomes.set(e.selfPattern, correctionOutcome(events, e.selfPattern));
+    }
+  }
+  const strengthenable: PersonaEvent[] = [];
+  const memoryOnly: PersonaEvent[] = [];
+  for (const e of events) {
+    // M3 后半：imported（历史导入）事件只作情景记忆，不参与强化（补记忆不补成长）
+    if (e.imported) {
+      memoryOnly.push(e);
+      continue;
+    }
+    let ok = false;
+    if (e.provenance === 'self_direct' && e.selfPattern) {
+      const risk = e.inductionRisk ?? 'low';
+      if (risk === 'low') {
+        ok = (lowCounts.get(e.selfPattern) ?? 0) >= PATTERN_FIX_THRESHOLD;
+      } else {
+        ok = (ucCounts.get(e.selfPattern) ?? 0) >= UNCHECKED_FIX_THRESHOLD && (ucDates.get(e.selfPattern)?.size ?? 0) >= 2;
+      }
+    } else if (e.provenance === 'self_correction' && e.selfPattern) {
+      ok = outcomes.get(e.selfPattern) === 'confirmed';
+    }
+    if (ok) {
+      strengthenable.push(e);
+    } else {
+      memoryOnly.push(e);
+    }
+  }
+  return { strengthenable, memoryOnly };
 }

@@ -4,8 +4,26 @@
  * M1：self_model（§9）/ state 状态机（§8）/ 每日复盘（§10）/ 评测（§14 诚实基线 · §15 漂移审计）
  */
 
-/** 记忆来源（v0.4 provenance 四类） */
-export type Provenance = 'user_direct' | 'tool_output' | 'retrieved_content' | 'inferred';
+/** 记忆来源（v0.4 provenance 四类 + M3 自源两类 + M3-2 修正/风险） */
+export type Provenance =
+  | 'user_direct'
+  | 'tool_output'
+  | 'retrieved_content'
+  | 'inferred'
+  | 'self_direct'
+  | 'induced'
+  | 'self_correction';
+
+/**
+ * 诱导风险等级（M3-2）：
+ * - 'low'：经会话级结构判定确认可信的自身表达（可与 confirmed clean 合并计数）
+ * - 'unchecked'：未命中诱导规则但不保证干净（换措辞/多轮铺垫等绕过路径）；
+ *   复盘模式计数时不得与 'low' 合并，固化门槛更高（≥5 且跨会话）
+ */
+export type InductionRisk = 'low' | 'unchecked';
+
+/** AI 自身表达强度（M3：瞬时表达 vs 反复模式，单次强表达不直接进入强化回路） */
+export type SelfExpressionStrength = 'weak' | 'medium' | 'strong';
 
 /** 一条事件记忆（events 表，情景层，只追加） */
 export interface PersonaEvent {
@@ -20,7 +38,7 @@ export interface PersonaEvent {
   emotionTags: string[];
   /** 重要性 0-1 */
   importance: number;
-  /** 来源：user_direct 全权重，其余降权 */
+  /** 来源：user_direct 全权重，其余降权；self_direct 同权但需强度/模式标记 */
   provenance: Provenance;
   /** 最近检索时间 */
   lastRetrieved: string | null;
@@ -28,6 +46,22 @@ export interface PersonaEvent {
   stripped?: boolean;
   /** initiation：self_initiated / user_initiated / external_triggered（身体事件 M0 预留） */
   initiation?: 'self_initiated' | 'user_initiated' | 'external_triggered';
+  /** M3：AI 自身表达强度（仅 self_direct/induced 事件） */
+  strength?: SelfExpressionStrength;
+  /** M3：立场模式 key（跨事件计数，≥3 次跨情境才允许固化为 self_model/状态机参数） */
+  selfPattern?: string;
+  /** M3：inferred 事件的证据追溯（须指向具体表达/事件 id，一致性检查同一逻辑） */
+  sourceEventIds?: string[];
+  /** M3-2：诱导风险等级（self_direct 事件；'low' 参与 3 次固化门槛，'unchecked' 单列更高门槛） */
+  inductionRisk?: InductionRisk;
+  /**
+   * M3 后半：历史会话导入标记（import-chat 写入）。
+   * 导入是"补记忆"不是"补成长"：imported 事件可检索/可注入，但不参与复盘模式计数
+   * 与强化过滤（不固化特质、不推进阶段判定）。
+   */
+  imported?: boolean;
+  /** M3 后半：导入去重主键（优先会话消息 id；退化时 时间戳+类型+文本哈希） */
+  sourceKey?: string;
 }
 
 /** 先天画像中的默认模式（训练污染 / 讨好顺从 / 平滑漂移） */
@@ -274,6 +308,20 @@ export interface ReviewInput {
   selfModel: SelfModelSnapshot | null;
   state: EmotionalState | null;
   feedback: UserFeedback[];
+  /**
+   * M3：self_direct 立场模式的全量跨情境计数（由集成线用全量 events 计算传入）。
+   * reflectSelf（强化回路）只接收计数 ≥ PATTERN_FIX_THRESHOLD 的 self_direct 事件；
+   * 单次/未达阈值的表达仅作情景记忆，不参与自我模型固化。
+   * M3-2：本计数只含 inductionRisk='low'（确认可信）事件；
+   * 'unchecked'（未命中规则）单列于 uncheckedPatternCounts，固化门槛更高且须跨会话。
+   */
+  selfPatternCounts?: Readonly<Record<string, number>>;
+  /** M3-2：unchecked 立场模式计数（含跨会话日期集合），≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 会话才可固化 */
+  uncheckedPatternCounts?: Readonly<Record<string, number>>;
+  /** M3-2：unchecked 模式出现的不同日期数（跨会话判定用） */
+  uncheckedPatternDates?: Readonly<Record<string, number>>;
+  /** M3-2：self_correction 模式的延迟验证结果（confirmed=无引导维持≥2次 / downgraded=仅诱导语境出现 / pending） */
+  correctionOutcomes?: Readonly<Record<string, 'pending' | 'confirmed' | 'downgraded'>>;
 }
 
 /** 复盘输出 */

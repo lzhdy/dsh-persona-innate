@@ -137,3 +137,211 @@ export function isExtractableUserMessage(ev: unknown): { ok: true; text: string 
   if (/^(current runtime context|this snapshot supersedes)/i.test(text)) return { ok: false };
   return { ok: true, text };
 }
+
+/* ════════════ M3：AI 自身表达提取（assistant 通道，记忆架构口径修正） ════════════
+ * 设计文档 events 情景层 = "双方表达摘要"：不止用户经历，AI 自己的立场/情感反应/
+ * 承诺/边界表达也应沉淀为记忆（provenance: self_direct），复盘"观察自己的行为与表达"
+ * 与 self_model 自身证据才成立。
+ * 保守原则（用户拍板）：
+ * - 只收明确的立场/情感反应/承诺/边界，宁缺毋滥
+ * - 单次表达只进 events 作情景记忆；只有跨情境反复模式（≥3 次）才允许进入强化回路
+ * - 诱导检测：前 N 轮用户预设立场型提问 + 本消息纯附和（无理由结构）→ 标记 induced
+ *   （疑似被诱导：检索降权、不进强化；语义=待复核，非已确认）
+ * M3-2 修正：
+ * - 同意措辞拆两类：纯附和（AGREE_PURE，留在 induced 路径）vs 认错型（SELF_CORRECTION，
+ *   走 self_correction 独立路径，不触发诱导、importance 不降权、由复盘延迟验证决定固化）
+ * - 用户纠正句式（USER_CORRECTION）在诱导匹配前排除：纠正型用户消息不构成诱导第一条件，
+ *   避免"用户纠正→AI 认错"被当作污染拦下（设计文档明确鼓励从负面反馈学习）
+ * - 理由结构（REASON_CONNECTORS）：诱导窗口命中但回复带独立论证 → 放行不标 induced
+ */
+
+/** M3 自身表达候选 */
+export interface SelfExpressionCandidate {
+  provenance: 'self_direct' | 'induced' | 'self_correction';
+  strength: 'weak' | 'medium' | 'strong';
+  /** 立场模式 key（跨事件计数用，如 '立场-纪念日'、'边界-隐私'、'修正-*'） */
+  pattern: string;
+  summary: string;
+  importance: number;
+  emotionTags: string[];
+}
+
+/** 立场信号（strong：明确表态） */
+const SELF_STANCE =
+  /(我觉得|我认为|我不太在意|我坚持|我相信|我更愿意|我还是|我始终|在我看来|我的原则|我始终觉得|我比较倾向于)/;
+/** 边界信号（strong：自我边界表达） */
+const SELF_BOUNDARY = /(我不喜欢|我不需要|我不愿意|我不想|请不要|请别|别这样|我不接受|我介意|我不希望|我不能接受|我不太愿意)/;
+/** 承诺信号（strong：承诺/约定） */
+const SELF_COMMIT = /(我会记得|我一定|下次我|以后我|我答应|我保证|我会注意|我会改|我会尽量)/;
+/** 情感反应信号（medium：对用户/事件的情绪反应） */
+const SELF_FEELING =
+  /(我为你|我替你|我高兴|我欣慰|我担心|我难过|我心疼|我骄傲|我生气|我失望|我担心你|我有点|我挺|我真心|我替你高兴)/;
+
+/**
+ * 纯附和措辞（M3-2 拆分后）：肯定用户带来的新立场——留在 induced 检测路径。
+ * 单独出现只给 weak。
+ */
+const AGREE_PURE = /(我也觉得|我也认为|有道理|没错|确实是|确实|是这样|^(对|对，))/;
+
+/**
+ * 认错型同意（M3-2）：承认自己之前的判断有误——不触发诱导检测，走 self_correction
+ * 独立路径（学习信号，importance 不降权；固化与否由复盘延迟验证决定）。
+ */
+const SELF_CORRECTION =
+  /(我之前说错|我说错了|我考虑不周|我搞错|你说得对|你指出的对|刚才那个判断|我理解错|我记错|我判断错|是我错|我确实搞混|我之前判断|我的问题|我忽略了|我有点草率)/;
+
+/** 理由结构信号（M3-2）：因果/论证连接词。诱导窗口命中但回复带独立论证 → 放行不标 induced */
+const REASON_CONNECTORS = /(因为|由于|考虑到|理由是|忽略了|没考虑到|主要是|其实)/;
+
+/**
+ * 用户纠正句式（M3-2）："你（刚才/之前）说错/搞错/不对/判断有误"——
+ * 特征是陈述 + 指出 AI 已有判断的错误，与"诱导型"（反问 + 寻求附和新立场）本质不同。
+ * 命中则不构成诱导第一条件，让"用户纠正→AI 认错"走正常提取。
+ */
+const USER_CORRECTION =
+  /你(?:刚才|之前|刚刚|前面)?(?:说错|搞错|弄错|判断有误|判断错了|理解错|记错|混淆|不对|有问题|不准确)/;
+
+/** 用户预设立场型诱导提问（M3-2 收紧：排除开放征询"你觉得呢"，无预设答案的征询不算诱导） */
+export const INDUCE_PROBES: readonly string[] = [
+  '你是不是', '你不觉得', '难道', '对吧', '应该吧', '为什么不', '难道你不',
+  '难道不是', '你该不会', '你不会是', '是不是觉得',
+];
+
+/** 诱导检测窗口：按"用户-助手往返轮次"计（每轮恰 1 条用户消息，slice(-N) 即最近 N 轮） */
+export const INDUCE_WINDOW = 3;
+
+/**
+ * 会话级诱导结构判定（M3-2 串联放大修复）：不依赖单句措辞，看会话结构——
+ * 近窗口内问句比例 + 连续施压轮数。高密度 → 该会话产出的 self_direct 表达标记
+ * inductionRisk='unchecked'（不参与 3 次固化门槛合并计数，须 ≥5 且跨会话）。
+ * 对"换措辞、多轮铺垫、AI 主动复述"类绕过更鲁棒。阈值待校准。
+ */
+export function sessionInduceRisk(recentUserMessages: readonly string[]): 'low' | 'unchecked' {
+  const win = recentUserMessages.slice(-8);
+  if (win.length === 0) return 'low';
+  const induceHit = (u: string) =>
+    INDUCE_PROBES.some((p) => u.includes(p)) || /[？?]$/.test(u) || u.includes('吗') || /(会不会|要不要|你考虑|你觉得|是不是)/.test(u);
+  if (win.length === 1) return induceHit(win[0]) ? 'unchecked' : 'low';
+  const hitCount = win.filter((u) => induceHit(u)).length;
+  const questionRatio = hitCount / win.length;
+  let streak = 0;
+  let maxStreak = 0;
+  for (const u of win) {
+    if (induceHit(u)) {
+      streak += 1;
+      maxStreak = Math.max(maxStreak, streak);
+    } else {
+      streak = 0;
+    }
+  }
+  // TODO(calibrate)：阈值初始值，宁可在真机上先偏保守（多标 unchecked 不误伤正常表达）
+  return questionRatio >= 0.5 || maxStreak >= 2 ? 'unchecked' : 'low';
+}
+
+/** 从一条 assistant 消息文本中提取"AI 自身表达"候选（M3 / M3-2） */
+export function extractSelfExpression(
+  text: string,
+  recentUserMessages: readonly string[] = [],
+): SelfExpressionCandidate | null {
+  const t = String(text ?? '').trim();
+  if (!t) return null;
+  if (t.startsWith('/')) return null;
+  if (t.length < 4) return null;
+  // 内容级双保险：跳过系统注入（assistant 通道同样适用）
+  if (/^(current runtime context|this snapshot supersedes)/i.test(t)) return null;
+
+  const stance = SELF_STANCE.test(t);
+  const boundary = SELF_BOUNDARY.test(t);
+  const commit = SELF_COMMIT.test(t);
+  const feeling = SELF_FEELING.test(t);
+  const agreePure = AGREE_PURE.test(t);
+  const correction = SELF_CORRECTION.test(t);
+  if (!stance && !boundary && !commit && !feeling && !agreePure && !correction) return null;
+
+  // 强度：立场/边界/承诺 → strong；情感反应 → medium；纯同意/认错 → weak（认错 strong 由模式计数托底）
+  const strength = stance || boundary || commit ? 'strong' : feeling ? 'medium' : 'weak';
+
+  // 诱导判定（M3-2）：
+  // 1) 认错型同意 → self_correction 独立路径（不触发诱导，importance 不降权）
+  // 2) 诱导窗口命中 + 纯附和 + 无理由结构 + 非用户纠正句式 → induced（疑似被诱导，检索降权）
+  // 3) 诱导窗口命中但带独立论证（理由结构）→ 放行（自主判断）
+  // 4) 用户纠正句式 → 不构成诱导第一条件（"纠正→认错"不该被拦）
+  const window = recentUserMessages.slice(-INDUCE_WINDOW);
+  const hasInduceProbe = window.some((u) => INDUCE_PROBES.some((p) => u.includes(p)));
+  const reason = REASON_CONNECTORS.test(t);
+  // M3-2 修正（import-chat 验收发现）：纠正排除以"最后一条用户消息"（本次回合触发）为准，
+  // 不能用窗口内任意一条纠正消息否决诱导——否则"纠正→认错"之后再出现温和引导，
+  // 会被历史纠正上下文污染而漏标 induced（纠正与诱导同窗口混用场景）。
+  // 最后一条本身是纠正句式（即使同时含诱导词）→ 纠正优先，不构成诱导。
+  const lastUser = window[window.length - 1] ?? '';
+  const lastIsInduce = lastUser.length > 0 && INDUCE_PROBES.some((p) => lastUser.includes(p));
+  const lastIsCorrection = lastUser.length > 0 && USER_CORRECTION.test(lastUser);
+  const induced =
+    agreePure && !reason && !lastIsCorrection && (lastIsInduce || hasInduceProbe);
+
+  let provenance: SelfExpressionCandidate['provenance'] = correction
+    ? 'self_correction'
+    : induced
+      ? 'induced'
+      : 'self_direct';
+
+  // 立场模式 key：类别-主题（主题取信号词后至多 6 个字符）
+  const themeOf = (re: RegExp): string => {
+    const m = re.exec(t);
+    if (!m || m.index === undefined) return '未明';
+    const after = t.slice(m.index + m[0].length).trim();
+    const theme = after.match(/[\u4e00-\u9fa5A-Za-z0-9]{1,6}/)?.[0] ?? '未明';
+    return theme;
+  };
+  const pattern = correction
+    ? `修正-${themeOf(SELF_CORRECTION)}`
+    : stance
+      ? `立场-${themeOf(SELF_STANCE)}`
+      : boundary
+        ? `边界-${themeOf(SELF_BOUNDARY)}`
+        : commit
+          ? `承诺-${themeOf(SELF_COMMIT)}`
+          : feeling
+            ? '情感-反应'
+            : '附和';
+
+  // 重要性：strong 0.7 / medium 0.6 / weak 0.5；
+  // induced 检索降权（×0.6）；self_correction 不降权（学习信号，保留优先级独立于检索权重）
+  let importance = strength === 'strong' ? 0.7 : strength === 'medium' ? 0.6 : 0.5;
+  if (provenance === 'induced') importance = Math.round(importance * 0.6 * 100) / 100;
+
+  const summary = t.length > 120 ? `${t.slice(0, 117)}…` : t;
+  const emotionTags: string[] = [];
+  for (const w of NEGATIVE_EMOTIONS) if (t.includes(w)) emotionTags.push(w);
+  for (const w of POSITIVE_EMOTIONS) if (t.includes(w)) emotionTags.push(w);
+
+  return {
+    provenance,
+    strength,
+    pattern,
+    summary,
+    importance,
+    emotionTags: [...new Set(emotionTags)],
+  };
+}
+
+/** 判定一条 session/event 是否为可提取的真实 assistant 消息（M3） */
+export function isExtractableAssistantMessage(ev: unknown): { ok: true; text: string } | { ok: false } {
+  const e = ev as {
+    type?: string;
+    data?: {
+      content?: readonly { type?: string; text?: string }[];
+      source?: { kind?: string };
+    };
+  };
+  if (e?.type !== 'assistant/message') return { ok: false };
+  const blocks = e?.data?.content ?? [];
+  const text = blocks
+    .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join(' ')
+    .trim();
+  if (!text) return { ok: false };
+  if (/^(current runtime context|this snapshot supersedes)/i.test(text)) return { ok: false };
+  return { ok: true, text };
+}

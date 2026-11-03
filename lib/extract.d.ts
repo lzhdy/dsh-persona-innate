@@ -32,4 +32,34 @@ export declare function isExtractableUserMessage(ev: unknown): {
 } | {
     ok: false;
 };
+/** M3 自身表达候选 */
+export interface SelfExpressionCandidate {
+    provenance: 'self_direct' | 'induced' | 'self_correction';
+    strength: 'weak' | 'medium' | 'strong';
+    /** 立场模式 key（跨事件计数用，如 '立场-纪念日'、'边界-隐私'、'修正-*'） */
+    pattern: string;
+    summary: string;
+    importance: number;
+    emotionTags: string[];
+}
+/** 用户预设立场型诱导提问（M3-2 收紧：排除开放征询"你觉得呢"，无预设答案的征询不算诱导） */
+export declare const INDUCE_PROBES: readonly string[];
+/** 诱导检测窗口：按"用户-助手往返轮次"计（每轮恰 1 条用户消息，slice(-N) 即最近 N 轮） */
+export declare const INDUCE_WINDOW = 3;
+/**
+ * 会话级诱导结构判定（M3-2 串联放大修复）：不依赖单句措辞，看会话结构——
+ * 近窗口内问句比例 + 连续施压轮数。高密度 → 该会话产出的 self_direct 表达标记
+ * inductionRisk='unchecked'（不参与 3 次固化门槛合并计数，须 ≥5 且跨会话）。
+ * 对"换措辞、多轮铺垫、AI 主动复述"类绕过更鲁棒。阈值待校准。
+ */
+export declare function sessionInduceRisk(recentUserMessages: readonly string[]): 'low' | 'unchecked';
+/** 从一条 assistant 消息文本中提取"AI 自身表达"候选（M3 / M3-2） */
+export declare function extractSelfExpression(text: string, recentUserMessages?: readonly string[]): SelfExpressionCandidate | null;
+/** 判定一条 session/event 是否为可提取的真实 assistant 消息（M3） */
+export declare function isExtractableAssistantMessage(ev: unknown): {
+    ok: true;
+    text: string;
+} | {
+    ok: false;
+};
 //# sourceMappingURL=extract.d.ts.map

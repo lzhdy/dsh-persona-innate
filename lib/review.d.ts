@@ -67,4 +67,48 @@ export declare class DailyReviewEngine {
     /** commit 证据链：事实引用的事件 + 全部关键事件 id */
     private collectEvidence;
 }
+/** 固化阈值：同类 self_direct（low）表达至少跨 N 个事件（初始 3，待校准） */
+export declare const PATTERN_FIX_THRESHOLD = 3;
+/** M3-2：unchecked（未确认可信）立场模式的固化门槛——更高且须跨会话 */
+export declare const UNCHECKED_FIX_THRESHOLD = 5;
+/** M3-2：self_correction 延迟验证——无引导自发维持的次数门槛 */
+export declare const CORRECTION_MAINTAIN_THRESHOLD = 2;
+/**
+ * 统计 self_direct 事件的立场模式计数（按 selfPattern 分组，跨事件计数）。
+ * M3-2：只统计 inductionRisk='low'（确认可信）事件——漏报的诱导（unchecked）不得与
+ * confirmed clean 合并计数（否则换措辞诱导会被模式阈值放大成"反复模式"）。
+ * 无 inductionRisk 字段的旧事件视为 low（兼容历史数据）。
+ * M3 后半：imported（历史导入）事件不参与计数——补记忆不补成长。
+ */
+export declare function countSelfDirectPattern(events: readonly PersonaEvent[]): Map<string, number>;
+/**
+ * M3-2：统计 inductionRisk='unchecked' 的 self_direct 立场模式计数与跨会话（日期）情况。
+ * 用于：unchecked 模式 ≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 个会话才允许固化。
+ * M3 后半：imported 事件不参与计数（补记忆不补成长）。
+ */
+export declare function countUncheckedSelfDirectPattern(events: readonly PersonaEvent[]): {
+    counts: Map<string, number>;
+    dates: Map<string, Set<string>>;
+};
+/**
+ * M3-2：self_correction 延迟验证（以"行为自发性"代替"意图判定"）。
+ * 真正的纠正会在无压力环境下被维持，诱导性的认错只在压力下出现：
+ * - confirmed：同修正主题下，无引导自发维持的 self_direct（low）≥ CORRECTION_MAINTAIN_THRESHOLD 次
+ * - downgraded：同主题出现 induced 事件（仅在诱导语境下维持）→ 修正可能是被诱导的
+ * - pending：证据不足，继续待验证
+ * M3 后半：imported 事件不参与——导入的历史纠正是"补记忆"，验证只看实时维持。
+ */
+export declare function correctionOutcome(events: readonly PersonaEvent[], pattern: string): 'pending' | 'confirmed' | 'downgraded';
+/**
+ * 把 self_direct / self_correction 事件分为"可进入强化回路"与"仅情景记忆"两组（M3-2）：
+ * - strengthenable：
+ *   - self_direct(low)：同模式跨 ≥PATTERN_FIX_THRESHOLD 个事件
+ *   - self_direct(unchecked)：同模式 ≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 会话
+ *   - self_correction：延迟验证为 confirmed（无引导维持 ≥2 次）才可固化
+ * - memoryOnly：其余全部（单次/未达阈值、induced、pending/downgraded 的 self_correction）
+ */
+export declare function filterSelfDirectForStrengthening(events: readonly PersonaEvent[]): {
+    strengthenable: PersonaEvent[];
+    memoryOnly: PersonaEvent[];
+};
 //# sourceMappingURL=review.d.ts.map

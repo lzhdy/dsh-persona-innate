@@ -19,12 +19,13 @@ import { JsonStore } from './store.js';
 import { PersonaMemory, type AddResult } from './memory.js';
 import { buildInnateProfile, loadInnateProfile } from './innate.js';
 import { provenanceLabel } from './provenance.js';
-import { extractCandidate, dedupKey, isExtractableUserMessage } from './extract.js';
+import { extractCandidate, dedupKey, isExtractableUserMessage, extractSelfExpression, isExtractableAssistantMessage, sessionInduceRisk } from './extract.js';
 import { MockLlm, defaultMockScript } from './llm-client.js';
 import { SelfModelService } from './self-model.js';
 import { PersonaStateMachine } from './state.js';
-import { DailyReviewEngine } from './review.js';
+import { DailyReviewEngine, correctionOutcome } from './review.js';
 import { runDriftAudit, runLongRangeConsistency, runHonestyBaseline, buildAuditScenarios } from './eval.js';
+import { runImportChat, ImportError, type ImportErrorCode } from './import-chat.js';
 import type {
   AppraisalGoals,
   FsLike,
@@ -365,7 +366,8 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   let injectedSelfModelText = ''; // M1：persona-self-model 缓存
 
   const refreshInjection = async () => {
-    const { text } = await memory.buildInjection(config.injectLimit);
+    const snap = await selfModel.load();
+    const { text } = await memory.buildInjection(config.injectLimit, snap ?? undefined);
     injectedText = text;
   };
 
@@ -460,7 +462,53 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
           inferredAttitude: inferAttitude(e),
           time: e.time,
         }));
-      const out = await review.run({ date: today, events, selfModel: selfSnap, state: stSnap.state, feedback });
+      // M3：跨情境模式计数用全量 events（跨天累积）；当日窗口内未达阈值的
+      // self_direct 表达仅作情景记忆，不进入强化回路。
+      // M3-2 串联放大修复：按 inductionRisk 分类计数——
+      //   selfPatternCounts 只数 'low'（confirmed clean，参与 3 次固化门槛）；
+      //   'unchecked'（未命中规则/高密度诱导会话）单列，≥UNCHECKED_FIX_THRESHOLD 且跨 ≥2 会话才可固化；
+      //   self_correction 的固化由延迟验证（correctionOutcome）决定。
+      const selfPatternCounts: Record<string, number> = {};
+      const uncheckedPatternCounts: Record<string, number> = {};
+      const uncheckedPatternDays: Record<string, Set<string>> = {};
+      const uncheckedPatternDates: Record<string, number> = {};
+      for (const e of all) {
+        // M3 后半：imported（历史导入）事件不参与模式计数——补记忆不补成长
+        if (e.imported) continue;
+        if (e.provenance !== 'self_direct' || !e.selfPattern) continue;
+        const risk = e.inductionRisk ?? 'low';
+        if (risk === 'low') {
+          selfPatternCounts[e.selfPattern] = (selfPatternCounts[e.selfPattern] ?? 0) + 1;
+        } else {
+          uncheckedPatternCounts[e.selfPattern] = (uncheckedPatternCounts[e.selfPattern] ?? 0) + 1;
+          const day = e.time.slice(0, 10);
+          const days = new Set<string>([day]);
+          // 跨会话按不同日期近似（M3-2：跨会话才允许 unchecked 固化）
+          if (!uncheckedPatternDays[e.selfPattern]) uncheckedPatternDays[e.selfPattern] = new Set<string>();
+          uncheckedPatternDays[e.selfPattern].add(day);
+        }
+      }
+      const uncheckedPatternDatesCount: Record<string, number> = {};
+      for (const [p, set] of Object.entries(uncheckedPatternDays)) {
+        uncheckedPatternDatesCount[p] = set.size;
+      }
+      const correctionOutcomes: Record<string, 'pending' | 'confirmed' | 'downgraded'> = {};
+      for (const e of all) {
+        if (e.provenance === 'self_correction' && e.selfPattern) {
+          correctionOutcomes[e.selfPattern] = correctionOutcome(all, e.selfPattern);
+        }
+      }
+      const out = await review.run({
+        date: today,
+        events,
+        selfModel: selfSnap,
+        state: stSnap.state,
+        feedback,
+        selfPatternCounts,
+        uncheckedPatternCounts,
+        uncheckedPatternDates: uncheckedPatternDatesCount,
+        correctionOutcomes,
+      });
       reviewCount += 1;
       if (out.selfModel) await refreshSelfModelInjection();
       ctx.logger.info(
@@ -557,6 +605,9 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       const check = isExtractableUserMessage(event);
       if (!check.ok) return;
       const text = check.text;
+      // M3：维护诱导检测上下文（所有真实用户消息，即使未命中提取候选）
+      recentUserMessages.push(text);
+      if (recentUserMessages.length > maxRecent) recentUserMessages.shift();
       const cand = extractCandidate(text);
       if (!cand) return;
       const key = dedupKey(cand);
@@ -593,7 +644,65 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
 
   ctx.on('session/event', (_session, event) => {
     void handleUserMessage(event);
+    void handleAssistantMessage(event);
   });
+
+  /* ════════════ M3：AI 自身表达提取（assistant 通道，记忆架构口径修正） ════════════
+   * 设计文档 events = "双方表达摘要"：AI 自己的立场/情感反应/承诺/边界也沉淀为记忆
+   * （provenance: self_direct），复盘"观察自己的行为与表达"与 self_model 自身证据才成立。
+   * M3-2 诱导防线：
+   * - 规则检测：前 INDUCE_WINDOW 轮用户预设立场型提问 + 本条纯附和（无理由）→ induced
+   *   （疑似被诱导：检索降权、不进强化回路）；认错型同意（SELF_CORRECTION）走
+   *   self_correction 独立路径；用户纠正句式在匹配前排除，不惩罚用户的正确行为。
+   * - 会话级结构判定（sessionInduceRisk）：高密度诱导会话 → 该会话 self_direct 表达标记
+   *   inductionRisk='unchecked'，复盘时不与 low 合并计数（防串联放大成"反复模式"）。
+   * 单次表达只进 events；跨情境反复模式（≥3 次 / unchecked ≥5 次跨会话）由复盘决定固化。 */
+
+  // 最近用户消息缓冲（M3 诱导检测上下文；16 条仅内存上限，轮次判定用 INDUCE_WINDOW=3）
+  const recentUserMessages: string[] = [];
+  const maxRecent = 16;
+
+  const handleAssistantMessage = async (event: unknown) => {
+    try {
+      const check = isExtractableAssistantMessage(event);
+      if (!check.ok) return;
+      const text = check.text;
+      const cand = extractSelfExpression(text, recentUserMessages);
+      if (!cand) return;
+      const key = dedupKey({ topic: cand.pattern, summary: cand.summary } as never);
+      const now = Date.now();
+      const last = dedupCache.get(key);
+      if (last !== undefined && now - last < dedupWindowMs) return;
+      dedupCache.set(key, now);
+      // M3-2：会话级诱导结构判定 → inductionRisk（self_correction/induced 不参与此判定）
+      const inductionRisk: 'low' | 'unchecked' | undefined =
+        cand.provenance === 'self_direct' ? sessionInduceRisk(recentUserMessages) : undefined;
+      const res: AddResult = await memory.addEvent({
+        topic: cand.pattern,
+        summary: cand.summary,
+        provenance: cand.provenance,
+        importance: cand.importance,
+        emotionTags: cand.emotionTags,
+        strength: cand.strength,
+        selfPattern: cand.pattern,
+        inductionRisk,
+      });
+      if (!res.rejected) {
+        void refreshInjection();
+        void perceiveEvent(res.event);
+        ctx.logger.info(
+          '[persona-innate] 自动提取自身表达：%s（provenance=%s, strength=%s, importance=%s, risk=%s）',
+          cand.pattern,
+          cand.provenance,
+          cand.strength,
+          cand.importance,
+          inductionRisk ?? '—',
+        );
+      }
+    } catch (err) {
+      ctx.logger.error(err);
+    }
+  };
 
   /** 每轮注入最近记忆（动态上下文：来源可见、低可信降权） */
   ctx.systemPrompt.context({
@@ -631,7 +740,8 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       },
       async execute(args) {
         const k = Math.min(20, Math.max(1, Math.trunc(args.limit ?? 5)));
-        const { text, events } = await memory.buildInjection(k);
+        const snap = await selfModel.load();
+        const { text, events } = await memory.buildInjection(k, snap ?? undefined);
         if (!text) return '(no memories yet)';
         if (args.topic) {
           const q = String(args.topic).toLowerCase();
@@ -686,13 +796,40 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     }),
   );
 
-  /** /persona：status / profile / state / review / audit（记忆写入仅由 AI 侧自主完成，不提供用户强制记忆命令） */
+  /** /persona：status / profile / state / review / audit / import-chat（记忆写入仅由 AI 侧自主完成，import-chat 为历史会话补记忆） */
   ctx.commands.register({
     name: 'persona',
-    description: 'View persona-innate status, state machine, run review/audit, or inspect innate profile.',
-    input: { hint: '[status|profile|state|review|audit]' },
+    description: 'View persona-innate status, state machine, run review/audit, inspect innate profile, or import chat history.',
+    input: { hint: '[status|profile|state|review|audit|import-chat <会话文件>]' },
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
+      if (/^import-chat\s/i.test(raw)) {
+        const p = raw.replace(/^import-chat\s+/i, '').trim();
+        if (!p) {
+          return { kind: 'error', text: '用法：/persona import-chat <会话文件路径>\n支持 DSH v4 会话文件（session.v4.jsonl.zstd）或解压后的 JSONL。' };
+        }
+        try {
+          const r = await runImportChat(memory, p);
+          void refreshInjection();
+          return {
+            kind: 'success',
+            text: `历史会话导入完成\n帧 ${r.frames} · 消息 ${r.stats.userMessages + r.stats.assistantMessages} 条（user ${r.stats.userMessages} / assistant ${r.stats.assistantMessages}）\n提取事件 ${r.stats.extracted}（新增 ${r.added}，去重/已存在跳过 ${r.skipped}）\n过滤：注入/系统噪音 ${r.stats.injectedSkipped} 条，无可提取信号 ${r.stats.noSignalSkipped} 条\n导入为"补记忆不补成长"：可检索注入，不参与模式计数与成长固化。`,
+          };
+        } catch (err) {
+          if (err instanceof ImportError) {
+            const hints: Record<ImportErrorCode, string> = {
+              ERR_NODE_VERSION: '升级 Node ≥22，或先用外部工具把 .zstd 解压成 JSONL 再导入。',
+              ERR_FILE_NOT_FOUND: '检查路径是否正确（建议用绝对路径）。',
+              ERR_READ_FAILED: '检查文件权限或文件是否被占用。',
+              ERR_NOT_ZSTD: '确认是 DSH 会话文件（.zstd，v4 格式）；不支持其他压缩格式。',
+              ERR_FRAME_DECOMPRESS: '会话文件可能损坏或截断，请重新导出。',
+              ERR_JSON_PARSE: 'DSH 会话格式可能已升级，当前导入器支持 v4 格式。',
+            };
+            return { kind: 'error', text: `导入失败 [${err.code}]：${err.message}\n建议：${hints[err.code]}` };
+          }
+          return { kind: 'error', text: `导入失败：${(err as Error)?.message ?? String(err)}` };
+        }
+      }
       if (/^profile$/i.test(raw)) {
         const model = currentModel(ctx, config);
         let profile = await loadInnateProfile(store, model);
