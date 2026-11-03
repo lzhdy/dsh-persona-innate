@@ -12,6 +12,15 @@ export interface ExtractCandidate {
     emotionTags: string[];
 }
 /**
+ * 提取文本中出现的全部时间信号词。
+ * 规则：
+ * 1. 先用 ZHOU_TIME_RE 整体识别星期/周末词并记录字符区间；
+ * 2. 再用最长优先匹配普通时间词，跳过与已命中区间重叠的位置（词边界锚定），
+ *    因此「下周一」命中「周一」而非「下周」，「周末」整体命中、不被拆。
+ * 返回命中词数组（按出现位置），无命中返回空数组。
+ */
+export declare function matchTimeWords(text: string): string[];
+/**
  * 从一条用户消息文本中提取记忆候选。
  * 返回 null 表示不值得记录（命令、过短、纯抽象讨论）。
  */
@@ -55,7 +64,10 @@ export declare const INDUCE_WINDOW = 3;
 export declare function sessionInduceRisk(recentUserMessages: readonly string[]): 'low' | 'unchecked';
 /** 从一条 assistant 消息文本中提取"AI 自身表达"候选（M3 / M3-2） */
 export declare function extractSelfExpression(text: string, recentUserMessages?: readonly string[]): SelfExpressionCandidate | null;
-/** 判定一条 session/event 是否为可提取的真实 assistant 消息（M3） */
+/**
+ * 判定一条 session/event 是否为可提取的真实 assistant 消息（M3；P0 修正事件路径）。
+ * 真实 DSH 事件的表达内容在 data.message.content，兼容旧/直挂结构 data.content。
+ */
 export declare function isExtractableAssistantMessage(ev: unknown): {
     ok: true;
     text: string;

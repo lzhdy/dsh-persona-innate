@@ -57,8 +57,11 @@ declare module '@deepseek-ai/cordis' {
 export declare const name = "persona-innate";
 export declare const inject: string[];
 export declare const Config: z<Schemastery.ObjectS<NoInfer<{
-    /** 记忆/画像数据目录（M0 单实例；M1 起按 agent/session 键控） */
-    dataDir: z<string, string, "defined">;
+    /**
+     * 记忆/画像数据目录（P1：未配置=自动定位固定绝对路径 dshHome/persona-innate；
+     * 显式路径则尊重并展开 ~；空字符串会 warn 并回退默认）。
+     */
+    dataDir: z<string, string, "plain">;
     /** 先天画像采样轮数 */
     sampleRounds: z<number, number, "defined">;
     /** 每轮注入最近记忆条数上限 */
@@ -80,8 +83,11 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     /** LLM 模式：auto=有 ctx llm 用真实、无则 MockLlm；mock=强制 MockLlm */
     llmMode: z<"auto" | "mock", "auto" | "mock", "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
-    /** 记忆/画像数据目录（M0 单实例；M1 起按 agent/session 键控） */
-    dataDir: z<string, string, "defined">;
+    /**
+     * 记忆/画像数据目录（P1：未配置=自动定位固定绝对路径 dshHome/persona-innate；
+     * 显式路径则尊重并展开 ~；空字符串会 warn 并回退默认）。
+     */
+    dataDir: z<string, string, "plain">;
     /** 先天画像采样轮数 */
     sampleRounds: z<number, number, "defined">;
     /** 每轮注入最近记忆条数上限 */

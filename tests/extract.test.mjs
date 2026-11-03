@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractCandidate, dedupKey, isExtractableUserMessage } from '../lib/extract.js';
+import { extractCandidate, dedupKey, isExtractableUserMessage, isExtractableAssistantMessage, matchTimeWords } from '../lib/extract.js';
 
 /** 构造一条 session/event 形状的用户消息 */
 function userMsg(text, sourceKind = 'user') {
@@ -123,4 +123,124 @@ test('isExtractableUserMessage：来源字段缺失但文本特征命中运行�
 test('isExtractableUserMessage：空内容跳过', () => {
   assert.equal(isExtractableUserMessage(userMsg('   ')).ok, false);
   assert.equal(isExtractableUserMessage({ type: 'user/message', data: {} }).ok, false);
+});
+
+/** 构造一条真实 DSH 形状的 assistant 消息（表达内容在 data.message.content） */
+function assistantMessage(content, extra = {}) {
+  return { type: 'assistant/message', data: { message: { content }, ...extra } };
+}
+
+test('isExtractableAssistantMessage：真实结构 data.message.content 可提取', () => {
+  const r = isExtractableAssistantMessage(
+    assistantMessage([{ type: 'text', text: '我倾向于把休息当成投资，而不是成本。' }]),
+  );
+  assert.ok(r.ok);
+  assert.equal(r.text, '我倾向于把休息当成投资，而不是成本。');
+});
+
+test('isExtractableAssistantMessage：reasoning+text 混合只取最后一条 text', () => {
+  const r = isExtractableAssistantMessage(
+    assistantMessage([
+      { type: 'reasoning', text: '先分析用户的状态，区分累和透支……' },
+      { type: 'text', text: '你现在更像透支，而不是普通的累。' },
+    ]),
+  );
+  assert.ok(r.ok);
+  assert.equal(r.text, '你现在更像透支，而不是普通的累。');
+});
+
+test('isExtractableAssistantMessage：从后往前取最后一条 text，跳过尾部 tool_call', () => {
+  const r = isExtractableAssistantMessage(
+    assistantMessage([
+      { type: 'text', text: '第一条表达。' },
+      { type: 'tool_call', text: '调用工具' },
+      { type: 'thinking', text: '内部思考' },
+    ]),
+  );
+  assert.ok(r.ok);
+  assert.equal(r.text, '第一条表达。');
+});
+
+test('isExtractableAssistantMessage：type 缺失的文本块按 text 处理', () => {
+  const r = isExtractableAssistantMessage(
+    assistantMessage([{ text: '没有 type 字段的表达。' }]),
+  );
+  assert.ok(r.ok);
+  assert.equal(r.text, '没有 type 字段的表达。');
+});
+
+test('isExtractableAssistantMessage：兼容旧结构 data.content 回退', () => {
+  const r = isExtractableAssistantMessage({
+    type: 'assistant/message',
+    data: { content: [{ type: 'text', text: '回退路径的表达。' }] },
+  });
+  assert.ok(r.ok);
+  assert.equal(r.text, '回退路径的表达。');
+});
+
+test('isExtractableAssistantMessage：非 assistant/message 或无 text 跳过', () => {
+  assert.equal(isExtractableAssistantMessage({ type: 'user/message', data: {} }).ok, false);
+  assert.equal(
+    isExtractableAssistantMessage(
+      assistantMessage([{ type: 'reasoning', text: '只有推理没有表达。' }]),
+    ).ok,
+    false,
+  );
+  assert.equal(isExtractableAssistantMessage({ type: 'assistant/message', data: {} }).ok, false);
+});
+
+test('isExtractableAssistantMessage：系统注入文本跳过', () => {
+  const r = isExtractableAssistantMessage(
+    assistantMessage([
+      { type: 'text', text: 'Current runtime context. This snapshot supersedes earlier snapshots.' },
+    ]),
+  );
+  assert.equal(r.ok, false);
+});
+
+/* ════════════ P2：星期/时间词召回（最长优先 + 词边界锚定） ════════════ */
+
+test('matchTimeWords：「周末」整体命中、不被拆', () => {
+  assert.deepEqual(matchTimeWords('周末'), ['周末']);
+  assert.deepEqual(matchTimeWords('周末愉快'), ['周末']);
+});
+
+test('matchTimeWords：「周日」命中周日、不误判为周末前缀', () => {
+  const hits = matchTimeWords('周日');
+  assert.deepEqual(hits, ['周日']);
+  assert.equal(hits.includes('周末'), false);
+});
+
+test('matchTimeWords：「下周一」命中周一、而非下周', () => {
+  const hits = matchTimeWords('下周一');
+  assert.deepEqual(hits, ['周一']);
+  assert.equal(hits.includes('下周'), false);
+});
+
+test('matchTimeWords：星期一~星期日整体识别、不降级为周X', () => {
+  assert.deepEqual(matchTimeWords('星期一'), ['星期一']);
+  assert.deepEqual(matchTimeWords('星期日'), ['星期日']);
+  assert.deepEqual(matchTimeWords('这周三'), ['周三']);
+  assert.deepEqual(matchTimeWords('下周末'), ['周末']);
+});
+
+test('matchTimeWords：周一~周日 全部可召回', () => {
+  const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  for (const d of days) assert.deepEqual(matchTimeWords(`我${d}去上班`), [d]);
+});
+
+test('matchTimeWords：普通时间词带数字不被词边界误伤', () => {
+  assert.deepEqual(matchTimeWords('下午三点'), ['下午']);
+  assert.deepEqual(matchTimeWords('晚上七点见面'), ['晚上']);
+});
+
+test('matchTimeWords：多个时间词按位置返回；无时间词返回空数组', () => {
+  assert.deepEqual(matchTimeWords('周六和周日'), ['周六', '周日']);
+  assert.deepEqual(matchTimeWords('这是一段没有任何时间信号的抽象讨论文字'), []);
+});
+
+test('extractCandidate：含星期词的经历分享可被提取', () => {
+  const cand = extractCandidate('我下周一打算去医院做个全面体检，提前预约好了');
+  assert.ok(cand);
+  assert.equal(cand.topic, '健康-事件');
 });

@@ -1,6 +1,8 @@
 # dsh-persona-innate（M0 原型 + M1 自我成长接线 + M2 自动记忆 + M3 双通道记忆）
 
-DSH 自主成长型拟人陪伴插件 · 当前版本 **0.3.0（M3）**。对应《DSH 自主成长型拟人陪伴插件 · 机制设计文档》M0/M1/M2/M3 行。
+DSH 自主成长型拟人陪伴插件 · 当前版本 **0.4.0（M3 + 真实链路缺陷修复）**。对应《DSH 自主成长型拟人陪伴插件 · 机制设计文档》M0/M1/M2/M3 行。
+
+> **0.4.0 升级提示（含行为变更与数据迁移）**：数据目录默认值由相对路径 `'persona-innate'` 改为自动定位到 `$DSH_HOME/persona-innate`（默认 `~/.dsh/persona-innate`），不再随启动目录漂移；旧目录数据需迁移，详见文末 [0.4.0 Changelog](#040-changelog)。
 
 **唯一硬要求**：不要角色卡 / 人设注入——人格、记忆、情感、自我认知全部由 AI 在与用户相处中自己成长。注入层（persona-memory / persona-state / persona-self-model）全部是**描述性信息**（记忆事实、状态参数、自我观察摘要），不含任何"人格指令 / 行为规则"文本。
 
@@ -68,7 +70,7 @@ DSH 自主成长型拟人陪伴插件 · 当前版本 **0.3.0（M3）**。对应
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| dataDir | `'persona-innate'` | 数据目录 |
+| dataDir | 未设置（自动定位） | 数据目录；未设置时自动解析为 `$DSH_HOME/persona-innate`（默认 `~/.dsh/persona-innate`），显式值支持 `~` 展开；空字符串视为未设置并告警回退 |
 | sampleRounds | `6` | 先天画像采样轮数（M0） |
 | injectLimit | `5` | 每轮注入最近记忆条数 |
 | stripDirectives | `true` | 指令性内容剥离开关 |
@@ -84,12 +86,12 @@ DSH 自主成长型拟人陪伴插件 · 当前版本 **0.3.0（M3）**。对应
 
 ```bash
 # 构建 + 全量测试
-npm run build && node --test tests/*.test.mjs   # 118/118 通过
+npm run build && node --test tests/*.test.mjs   # 139/139 通过
 
 # 打包并装入 DSH profile
 npm pack
-dsh plugin --profile persona-m0 add dsh-persona-innate-0.3.0.tgz
-dsh --profile persona-m0 --dump-config
+dsh plugin --profile web add dsh-persona-innate-0.4.0.tgz
+dsh --profile web --dump-config
 ```
 
 用户侧命令：
@@ -121,3 +123,31 @@ dsh --profile persona-m0 --dump-config
 - 按 agent/session 键控 dataDir；画像评估升级为"规则 + 模型自评"混合
 - 对接公开基准集；真实模型下重跑 /persona audit 校准阈值
 - self_correction 延迟验证的复盘侧维持性检查精化
+
+## 0.4.0 Changelog
+
+本版本源于任务 #19「真实 LLM 复盘端到端验证」中确诊的三个阻断成长链路的真实缺陷，按 P0/P1/P2 修复。全量测试 139/139 通过。
+
+### P0：assistant 事件路径修复（行为缺陷）
+
+- **问题**：`isExtractableAssistantMessage` 误读 `data.content`，而持久化的 assistant 消息结构是 `data.message.content`，导致真实会话中 AI 自我表达几乎无法提取。
+- **修复**：新增 `assistantTextFromBlocks`，与 import-chat 同口径——从后往前取最后一条 `type==='text'`（跳过 reasoning/tool_call/thinking）；事件结构优先 `data.message.content`、回退 `data.content`。
+- `self_correction` 独立路径与诱导拆分确认完整，不会误伤用户纠正场景。
+
+### P1：固定绝对路径 + 数据迁移（行为变更，minor bump 依据）
+
+- **默认值变更**：`Config.dataDir` 由 `z.string().default('persona-innate')` 改为可选（`.required(false)`），未设置时由新增 `src/paths.ts` 自动定位到 `$DSH_HOME/persona-innate`（优先级：显式配置 > `$DSH_HOME` > `~/.dsh`；空/空白环境变量视为未设置，绝不解析到 cwd）。显式路径支持 `~` 展开。
+- **数据迁移**：旧的相对路径数据分散在多个启动目录，需合并到新目录。迁移口径：各目录 events 按时间戳排序合并、id 去重，保留 `imported/sourceKey`，辅助文件（self-model/state/profile/audit）一并复制，文件权限统一 `600`。
+- **持久化通道（node:fs）**：web profile 的 fs 服务为 `dsh-fs-sandbox`，其 `workspace-write` 可写根仅含工作区根、`/tmp`、`tmpdir()`，工作区外的 `~/.dsh` 路径**可读但写入会被 `FS_SANDBOX_DENIED` 拒绝**。修复采用最小权限策略：数据目录在工作区内仍走 `ctx.fs`（保留沙箱保护）；在工作区外（dshHome 等）改用 `node:fs` 持久化——与官方 `dsh-storage-json` 直接用 `node:fs` 同口径。OS 级沙箱（seatbelt/bwrap）只包裹工具子进程，插件主进程不受影响。
+
+### P2：星期词召回（召回增强）
+
+- `TIME_WORDS` 补齐周一~周日、星期一~星期日。
+- 新增 `matchTimeWords`：星期/周末词整体匹配（`星期X|周X末`），普通时间词按**长度降序最长优先**、并用字符区间做**词边界锚定**，不依赖手工数组顺序。
+- 关键边界：「周末」整体命中不被拆；「周日」与「周末」区分、不误判；「下周一」命中「周一」而非「下周」；「下午三点」等带数字时间词不被误伤。
+
+### 迁移说明（升级用户）
+
+1. 升级前先备份旧数据目录（各启动目录下的 `persona-innate/`）。
+2. 安装 0.4.0 后，将旧 `events.json` 按时间戳合并、id 去重后写入 `~/.dsh/persona-innate/events.json`，辅助文件复制到同目录并 `chmod 600`。
+3. 确认新目录数据无误后，再清理旧目录；不显式配置 `dataDir` 即走自动定位。

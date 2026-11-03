@@ -3,8 +3,8 @@
     - id: persona-innate
       name: 'dsh-persona-innate'
       config:
-        # 数据目录（相对 DSH 数据根；personaMemory 服务按此持久化）
-        dataDir: 'persona-innate'
+        # 数据目录：不在此显式配置，未配置时由 src/paths.ts 自动定位固定绝对路径
+        # dshHome/persona-innate（消除 cwd 相对路径漂移）；如需自定义可在用户 patch 层覆盖 dataDir。
         # 先天画像采样轮数（M0 默认 6 轮开放问题）
         sampleRounds: 6
         # 每轮注入最近记忆条数上限
