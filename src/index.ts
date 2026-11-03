@@ -19,6 +19,7 @@ import { JsonStore } from './store.js';
 import { PersonaMemory, type AddResult } from './memory.js';
 import { buildInnateProfile, loadInnateProfile } from './innate.js';
 import { provenanceLabel } from './provenance.js';
+import { extractCandidate, dedupKey, isExtractableUserMessage } from './extract.js';
 import { MockLlm, defaultMockScript } from './llm-client.js';
 import { SelfModelService } from './self-model.js';
 import { PersonaStateMachine } from './state.js';
@@ -57,6 +58,8 @@ declare module '@deepseek-ai/cordis' {
   }
   interface Events {
     'app/ready'(): void;
+    /** dsh-session 广播：会话日志追加（含 user/message）；本插件只读监听，无需注入 session 服务 */
+    'session/event'(session: unknown, event: unknown): void;
   }
 }
 
@@ -538,6 +541,58 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     } catch (err) {
       ctx.logger.error(err);
     }
+  });
+
+  /* ════════════ M2：自动记忆提取（session/event → user/message → 确定性规则） ════════════
+   * 修复：此前记忆只靠模型主动调 persona_note / 用户手动 remember，高质量对话 0 条入库。
+   * 现在订阅会话事件，用户消息命中"经历/情绪信号"即自动落库（provenance=user_direct，
+   * 指令性内容仍由 addEvent 剥离检查拒绝），并即时刷新注入缓存。 */
+
+  // 去重缓存：同主题同摘要 10 分钟内不重复记录
+  const dedupWindowMs = 10 * 60 * 1000;
+  const dedupCache = new Map<string, number>();
+
+  const handleUserMessage = async (event: unknown) => {
+    try {
+      const check = isExtractableUserMessage(event);
+      if (!check.ok) return;
+      const text = check.text;
+      const cand = extractCandidate(text);
+      if (!cand) return;
+      const key = dedupKey(cand);
+      const now = Date.now();
+      const last = dedupCache.get(key);
+      if (last !== undefined && now - last < dedupWindowMs) return;
+      dedupCache.set(key, now);
+      if (dedupCache.size > 64) {
+        for (const [k, ts] of dedupCache) {
+          if (now - ts >= dedupWindowMs) dedupCache.delete(k);
+        }
+      }
+      const res: AddResult = await memory.addEvent({
+        topic: cand.topic,
+        summary: cand.summary,
+        provenance: 'user_direct',
+        importance: cand.importance,
+        emotionTags: cand.emotionTags,
+      });
+      if (!res.rejected) {
+        void refreshInjection();
+        void perceiveEvent(res.event);
+        ctx.logger.info(
+          '[persona-innate] 自动记忆提取：%s（importance=%s, tags=%s）',
+          cand.topic,
+          cand.importance,
+          cand.emotionTags.join(',') || '—',
+        );
+      }
+    } catch (err) {
+      ctx.logger.error(err);
+    }
+  };
+
+  ctx.on('session/event', (_session, event) => {
+    void handleUserMessage(event);
   });
 
   /** 每轮注入最近记忆（动态上下文：来源可见、低可信降权） */

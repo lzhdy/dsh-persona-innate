@@ -50,6 +50,8 @@ declare module '@deepseek-ai/cordis' {
     }
     interface Events {
         'app/ready'(): void;
+        /** dsh-session 广播：会话日志追加（含 user/message）；本插件只读监听，无需注入 session 服务 */
+        'session/event'(session: unknown, event: unknown): void;
     }
 }
 export declare const name = "persona-innate";
