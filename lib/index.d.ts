@@ -7,7 +7,7 @@
  * - 记忆注入：ctx.systemPrompt.context（易变内容 → 动态上下文，保住 KV Cache 前缀）
  * - 模型可写记忆：persona_note 工具（自源通道，剥离检查后落库）
  * - 模型可查记忆：persona_recall 工具
- * - 用户侧：/persona 命令（status / profile / remember / state / review / audit）
+ * - 用户侧：/persona 命令（status / profile / state / review / audit）
  * - 画像：首次启动无预设采样 N 轮 → 评估默认模式 → 内部文件（不注入系统提示词）
  * - M1：state 写 self_model（onRuleChange 叙事解释）；复盘每日 reviewHour 静默执行；
  *   persona-state / persona-self-model 两个描述性注入 provider（order 160/170，禁止人格指令文本）

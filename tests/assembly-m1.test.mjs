@@ -124,14 +124,20 @@ test('M1 装配：两个新注入 provider 注册、文本非空不超长、为�
 });
 
 test('M1 接线：写入事件后状态机 history 增长；/persona state 子命令可用', async () => {
-  const { fiber, dataDir, contexts, commands } = await assemble();
+  const { root, fiber, dataDir, contexts, commands } = await assemble();
   await waitFor(() => contexts.find((c) => c.name === 'persona-state')?.text());
   const cmd = commands.find((c) => c.name === 'persona');
   assert.ok(cmd, '应注册 /persona 命令');
 
-  // remember 写一条 user_direct 事件
-  const res = await cmd.handler({ rawInput: 'remember 用户说他喜欢喝手冲咖啡' });
-  assert.equal(res.kind, 'success', res.text);
+  // M2：通过 session/event 自动提取写一条 user_direct 事件（不再有 /persona remember 用户强制记忆命令）
+  root.emit('session/event', {}, {
+    type: 'user/message',
+    data: {
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: '今天项目上线终于成功了，忙了整整一周' }],
+    },
+  });
 
   // 事件感知是 fire-and-forget：等状态机落盘 history 增长
   await waitFor(async () => {
@@ -154,11 +160,17 @@ test('M1 接线：写入事件后状态机 history 增长；/persona state 子�
 });
 
 test('M1 接线：/persona review 复盘后 self_model 版本递增 + 成长档案 + 自源重要性条目', async () => {
-  const { fiber, dataDir, commands } = await assemble();
+  const { root, fiber, dataDir, commands } = await assemble();
   const cmd = commands.find((c) => c.name === 'persona');
 
-  // 写入两条当日事件（importance=0.7 ≥ 关键事件阈值 0.2）
-  await cmd.handler({ rawInput: 'remember 用户今晚加班到深夜，情绪低落' });
+  // 写入两条当日事件（importance ≥ 关键事件阈值）：自动提取高/中信号各一条
+  const emit = (text) =>
+    root.emit('session/event', {}, {
+      type: 'user/message',
+      data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] },
+    });
+  emit('今天项目上线终于成功了，忙了整整一周');
+  emit('我今天心情不太好，有点难过');
   await waitFor(async () => {
     const raw = await readFile(join(dataDir, 'state.json'), 'utf-8');
     return JSON.parse(raw).history.length >= 1;

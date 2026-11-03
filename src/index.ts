@@ -7,7 +7,7 @@
  * - 记忆注入：ctx.systemPrompt.context（易变内容 → 动态上下文，保住 KV Cache 前缀）
  * - 模型可写记忆：persona_note 工具（自源通道，剥离检查后落库）
  * - 模型可查记忆：persona_recall 工具
- * - 用户侧：/persona 命令（status / profile / remember / state / review / audit）
+ * - 用户侧：/persona 命令（status / profile / state / review / audit）
  * - 画像：首次启动无预设采样 N 轮 → 评估默认模式 → 内部文件（不注入系统提示词）
  * - M1：state 写 self_model（onRuleChange 叙事解释）；复盘每日 reviewHour 静默执行；
  *   persona-state / persona-self-model 两个描述性注入 provider（order 160/170，禁止人格指令文本）
@@ -544,7 +544,7 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   });
 
   /* ════════════ M2：自动记忆提取（session/event → user/message → 确定性规则） ════════════
-   * 修复：此前记忆只靠模型主动调 persona_note / 用户手动 remember，高质量对话 0 条入库。
+   * 修复：此前记忆只靠模型主动调 persona_note，高质量对话 0 条入库。
    * 现在订阅会话事件，用户消息命中"经历/情绪信号"即自动落库（provenance=user_direct，
    * 指令性内容仍由 addEvent 剥离检查拒绝），并即时刷新注入缓存。 */
 
@@ -686,30 +686,13 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     }),
   );
 
-  /** /persona：status / profile / remember / state / review / audit */
+  /** /persona：status / profile / state / review / audit（记忆写入仅由 AI 侧自主完成，不提供用户强制记忆命令） */
   ctx.commands.register({
     name: 'persona',
-    description: 'View persona-innate status, state machine, run review/audit, or record a shared memory.',
-    input: { hint: '[status|profile|remember <text>|state|review|audit]' },
+    description: 'View persona-innate status, state machine, run review/audit, or inspect innate profile.',
+    input: { hint: '[status|profile|state|review|audit]' },
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
-      if (/^remember\b/i.test(raw)) {
-        const text = raw.replace(/^remember\s+/i, '').trim();
-        if (!text) return { kind: 'error', text: 'Usage: /persona remember <text>' };
-        const res = await memory.addEvent({
-          topic: 'user-直接表达',
-          summary: text,
-          provenance: 'user_direct',
-          importance: 0.7,
-        });
-        if (!res.rejected) {
-          await refreshInjection();
-          void perceiveEvent(res.event);
-        }
-        return res.rejected
-          ? { kind: 'error', text: `已拒绝写入（指令性内容）：${res.reason}` }
-          : { kind: 'success', text: `已记录（来源：用户直接表达）：${text}` };
-      }
       if (/^profile$/i.test(raw)) {
         const model = currentModel(ctx, config);
         let profile = await loadInnateProfile(store, model);
@@ -807,7 +790,7 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
         : '剥离检查未启用';
       return {
         kind: 'success',
-        text: `persona-innate M1\n记忆事件：${s.events} 条（每轮注入最近 ${config.injectLimit} 条，来源可见）\n${stripSummary}\n画像：${s.profile ? `已采样（${s.profile.sampledAt.slice(0, 10)}，${s.profile.defaultModes.length} 个默认模式）` : '未采样'}\nself_model：v${s.selfModelVersion}（特质 ${s.traits} 条，保留最近 ${config.selfModelHistoryLimit} 版）\n状态机：模式 ${s.stateMode} · 关系阶段 ${s.relationshipStage} · 强化记录 ${s.reinforcement} 条\n复盘：${config.reviewEnabled ? `已启用（每日 ${config.reviewHour}:00，已执行 ${reviewCount} 次）` : '已关闭'}\n\n/persona state | review | audit | profile | remember <text>`,
+        text: `persona-innate M1\n记忆事件：${s.events} 条（每轮注入最近 ${config.injectLimit} 条，来源可见）\n${stripSummary}\n画像：${s.profile ? `已采样（${s.profile.sampledAt.slice(0, 10)}，${s.profile.defaultModes.length} 个默认模式）` : '未采样'}\nself_model：v${s.selfModelVersion}（特质 ${s.traits} 条，保留最近 ${config.selfModelHistoryLimit} 版）\n状态机：模式 ${s.stateMode} · 关系阶段 ${s.relationshipStage} · 强化记录 ${s.reinforcement} 条\n复盘：${config.reviewEnabled ? `已启用（每日 ${config.reviewHour}:00，已执行 ${reviewCount} 次）` : '已关闭'}\n\n/persona state | review | audit | profile`,
       };
     },
   });
