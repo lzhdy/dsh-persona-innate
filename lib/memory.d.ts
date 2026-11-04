@@ -1,12 +1,15 @@
 /**
  * 记忆引擎（M0：events 事件层）
  * - 只存事实与事件摘要，不存行为脚本（写入前指令性内容剥离）
- * - provenance 四类来源，user_direct 全权重，其余降权
- * - 检索按 recallScore（来源权重 × 重要性）排序，注入带来源标注
- * - 跨会话：JSON 持久化，新会话加载同库
+ * - provenance 七类来源；可信度权重与显著性权重分离（提不提 ≠ 留不留）
+ * - 检索：五槽装配（近因/未结/线索/自我/轮廓），注入带来源与时间标注
+ * - 存储：按月分片 JSONL 追加日志，读失败不再退化为"空库后覆盖"
+ * - 软状态（lastRetrieved）只在内存维护，不每轮落盘
  */
 import type { PersonaEvent, Provenance } from './types.js';
 import { type StripStats } from './directive-strip.js';
+import { EventLog } from './event-log.js';
+import { type RecallSlot } from './recall.js';
 import type { KVStore } from './store.js';
 export interface MemoryOptions {
     stripDirectives: boolean;
@@ -17,22 +20,52 @@ export interface AddResult {
     rejected: boolean;
     reason?: string;
 }
+/** 注入装配的可选输入（向后兼容：不传等价于旧行为 + 无时间项） */
+export interface BuildInjectionOptions {
+    /** 当前用户消息，供线索槽使用 */
+    cueText?: string;
+    /** 注入时刻（毫秒），测试可注入 */
+    now?: number;
+    /** 未结线索：thread key → 事件 id（M4 复盘产出后接入） */
+    openThreads?: ReadonlyMap<string, readonly string[]>;
+    /**
+     * 注入文本字符预算。按条数限流会让"一条 118 字的自述"和"一条 60 字的用户事实"
+     * 占同一个名额（实测摘要长度 60–118 字，近 2 倍差），预算应按体量算。
+     */
+    maxChars?: number;
+}
+/** 默认注入字符预算（约等于 400–500 token） */
+export declare const DEFAULT_INJECTION_MAX_CHARS = 700;
+/** 折叠换行与连续空白为单空格（只用于注入渲染，不改存储原文） */
+export declare function oneLine(text: string): string;
+export interface InjectionResult {
+    text: string;
+    events: PersonaEvent[];
+    pendingReconcile: PersonaEvent[];
+    /** 每条注入记忆来自哪个槽位（归因用，不进入注入文本） */
+    slots: Array<{
+        id: string;
+        slot: RecallSlot;
+        score: number;
+    }>;
+}
 export declare class PersonaMemory {
     private readonly store;
     private readonly opts;
     readonly stripStats: StripStats;
+    private readonly log;
+    /** 软状态：本次会话内的检索时间（不落盘，flush 时随分片重写顺带持久化） */
+    private softDirty;
     constructor(store: KVStore, opts: MemoryOptions);
-    private eventsPath;
-    /**
-     * 写入串行队列：M3 开放 assistant 通道后，消息处理/注入刷新/复盘可能并发写 events.json，
-     * 两个异步 writeFile 交错会写坏 JSON（open(O_TRUNC)+write 混合）。所有"读-改-写"排队执行，
-     * 写入单线程化；读取先等队列排空，保证永远读到完整快照。
-     */
-    private writeQueue;
-    private enqueueWrite;
-    private loadEventsUnsafe;
     loadEvents(): Promise<PersonaEvent[]>;
+    /** 全量事件（按时间升序）。返回数组副本，元素为内部引用 */
+    list(): Promise<PersonaEvent[]>;
+    /**
+     * 全量重写（压缩/归档/测试构造用，不在对话热路径调用）。
+     */
     saveEvents(events: PersonaEvent[]): Promise<void>;
+    /** 分片存储统计（坏行、不可读月份、迁移来源） */
+    get storageStats(): EventLog['stats'];
     /**
      * 写入事件：剥离检查通过才落库；命中指令性内容则拒绝写入（O37 剥离优先于降权）
      */
@@ -56,12 +89,10 @@ export declare class PersonaMemory {
         /** M3 后半：导入去重主键（会话消息 id 或退化 key） */
         sourceKey?: PersonaEvent['sourceKey'];
     }): Promise<AddResult>;
-    /** 全量事件（按时间升序） */
-    list(): Promise<PersonaEvent[]>;
     /**
      * 批量导入历史会话事件（M3 后半 import-chat）：
-     * - 一次事务：整体排队读-改-写，防止与实时写入交错；中途状态不外泄
-     * - 去重：已有事件的 sourceKey（消息 id / 退化 key）与 dedupKey 双过滤，重复导入不产生重复记忆
+     * - 一次事务：按月聚合批量追加，中途状态不外泄
+     * - 去重：已有事件的 sourceKey（消息 id / 退化 key）与 dedupKey 双过滤
      * - 只追加不覆盖；返回新增/跳过统计
      */
     importEvents(candidates: PersonaEvent[]): Promise<{
@@ -69,20 +100,18 @@ export declare class PersonaMemory {
         skipped: number;
     }>;
     /**
-     * 检索最近记忆：recallScore = 来源权重 × 重要性；user_direct / self_direct 优先进入注入
-     * M3：注入前对 self_direct 记忆做叙事一致性检查——与当前 self_model 核心叙事显著冲突的
-     * 记忆不直接注入，标记为待复盘调和（pendingReconcile），由复盘引擎决定修订旧记忆权重
-     * 还是调整 self_model 叙事（重大转变须附带转变叙事）。
-     * 返回注入文本（每条带显式来源标注）、命中的事件与待调和事件
+     * 检索装配注入：五槽各取至多一条（近因/未结/线索/自我/轮廓），剩余按显著性补足。
+     * 不再为 lastRetrieved 写盘——它是软状态，只在内存更新。
      */
     buildInjection(limit?: number, selfModel?: {
         traits?: readonly string[];
         preferences?: readonly string[];
-    }): Promise<{
-        text: string;
-        events: PersonaEvent[];
-        pendingReconcile: PersonaEvent[];
-    }>;
+    }, opts?: BuildInjectionOptions): Promise<InjectionResult>;
+    /**
+     * 择机落盘软状态（会话结束/进程退出前调用）。
+     * 不放在每轮注入里：那会让一次纯读操作触发全库重写。
+     */
+    flushSoftState(): Promise<boolean>;
 }
 /** 叙事对立词对 [叙事正向, 叙事负向变体]（self_direct 事件与 self_model 核心叙事的冲突判定） */
 export declare const NARRATIVE_OPPOSITES: ReadonlyArray<{
@@ -106,6 +135,10 @@ export declare function narrativeConflict(e: {
  * 用户反应主导——自源重要性（是否进入 self_model 叙事、是否与插件自身目标/好奇相关）
  * 占主导，用户反应只作辅助信号。否则插件"自己觉得重要"的表达会因无用户回应被遗忘，
  * 重新制造"以用户为核心"的偏差。
+ *
+ * 注意与 SALIENCE_WEIGHT（提不提）的分工：本函数回答"留不留"，不参与注入排序。
+ * self_direct 的正确姿态是「高保留、低提及」。
+ *
  * M3-2 importance 解耦：检索权重（PROVENANCE_WEIGHT）可对 induced/self_correction 降权，
  * 但保留优先级不降权——induced 价值在于被标记可审计，self_correction 是学习信号，
  * 两者都必须活着供审计/验证。未来实现 O6 遗忘公式时不得在此维度复用检索降权。

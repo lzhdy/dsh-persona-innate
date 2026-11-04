@@ -107,6 +107,10 @@ export interface FsLike {
   readText(path: string): Promise<string>;
   writeText(path: string, content: string): Promise<unknown>;
   exists(path: string): Promise<boolean>;
+  /** 追加写（宿主提供时用 O_APPEND 语义；缺省由 JsonStore 退化为读-拼-写） */
+  appendText?(path: string, content: string): Promise<unknown>;
+  /** 原子改名（宿主提供时用于 temp+rename；缺省退化为先备份再覆盖） */
+  rename?(from: string, to: string): Promise<unknown>;
 }
 
 /** 会话最小调用面（用于跨会话键控，M0 简化为 dataDir 单实例） */
@@ -124,6 +128,14 @@ export type LlmRole = 'evaluate' | 'generate' | 'reflect';
 /** M1 LLM 调用面（mock 先行；真实实现待模型 key 后由 index.ts 适配 ctx.get('llm')） */
 export interface LlmClient {
   complete(input: { role?: LlmRole; prompt: string; system?: string; temperature?: number }): Promise<string>;
+  /**
+   * 是否为脚本化/模拟实现。
+   *
+   * 存在的理由：auto 模式在 llm 服务不可用时会降级 MockLlm，而 MockLlm 的输出是
+   * 预设文本。若把它写进 self_model / 成长档案，等于用"管线跑通"冒充"人格长出来了"。
+   * 调用方（复盘）据此拒绝提交——宁可这次不巩固，也不写假数据。
+   */
+  readonly synthetic?: boolean;
 }
 
 /* ── state 状态机（§8：效价×唤醒度分布参数 + 评价层 + 选择性强化） ── */

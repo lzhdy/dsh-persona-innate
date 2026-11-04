@@ -370,6 +370,8 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   // LLM 解析（懒解析 + 缓存）：auto → ctx.llm 适配，无则 MockLlm；mock → 强制 MockLlm
   let cachedLlm: LlmClient | null = null;
   let llmPromise: Promise<LlmClient> | null = null;
+  /** 上次复盘被门禁拦截的原因（供 /persona status 与 review 命令展示，避免静默跳过） */
+  let lastReviewBlocked: string | null = null;
   const resolveLlm = (): LlmClient => {
     if (cachedLlm) return cachedLlm;
     if (!llmPromise) {
@@ -426,10 +428,14 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   let injectedStateText = ''; // M1：persona-state 缓存
   let injectedSelfModelText = ''; // M1：persona-self-model 缓存
   let injectedContextText = ''; // 阶段一：persona-context 缓存（回合长度/对话类型，描述性）
+  /** 当前轮用户消息：作为线索槽输入（不依赖后声明的 recentUserMessages） */
+  let lastUserMessage = '';
 
   const refreshInjection = async () => {
     const snap = await selfModel.load();
-    const { text } = await memory.buildInjection(config.injectLimit, snap ?? undefined);
+    const { text } = await memory.buildInjection(config.injectLimit, snap ?? undefined, {
+      cueText: lastUserMessage,
+    });
     injectedText = text;
   };
 
@@ -531,6 +537,18 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
 
   const runDailyReview = async () => {
     try {
+      lastReviewBlocked = null;
+      // 门禁：auto 模式下 llm 服务未就绪时会降级为脚本化 MockLlm。
+      // 若放行，mock 的预设文本（"喜欢先倾听再回应"之类）会被写进真实 self_model
+      // 与成长档案——等于用"管线跑通"冒充"人格长出来了"，且一旦写入就无法区分真假。
+      // 只有用户显式选择 llmMode=mock（自己知道在跑演练）时才允许提交。
+      const llmNow = resolveLlm();
+      if (llmNow.synthetic && config.llmMode !== 'mock') {
+        lastReviewBlocked = 'LLM 处于降级 mock（llm 服务未就绪），不写入自我模型以免污染成长档案';
+        ctx.logger.warn('[persona-innate] 复盘跳过：%s', lastReviewBlocked);
+        return null;
+      }
+
       const today = new Date().toISOString().slice(0, 10);
       const all = await memory.list();
       const events = all.filter((e) => e.time.slice(0, 10) === today); // TODO(calibrate)：当日窗口
@@ -666,6 +684,17 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
 
   /** M1 注入预热：状态 + 自我模型摘要（失败降级为空文本，不阻塞启动） */
   ctx.once('app/ready', async () => {
+    // 顺带预热 LLM 解析。resolveLlm 为同步接口（复盘 getter 需要同步返回），
+    // 首次调用会先给 MockLlm、真实 adapter 就绪后替换——不预热的话，
+    // 进程内第一次复盘拿到的就是 mock（随后被门禁拦掉，等于白跑一次）。
+    resolveLlm();
+    if (llmPromise) {
+      try {
+        await llmPromise;
+      } catch (err) {
+        ctx.logger.warn('[persona-innate] LLM 预热失败：%s', String(err));
+      }
+    }
     try {
       await Promise.all([refreshStateInjection(), refreshSelfModelInjection()]);
     } catch (err) {
@@ -690,6 +719,8 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       // M3：维护诱导检测上下文（所有真实用户消息，即使未命中提取候选）
       recentUserMessages.push(text);
       if (recentUserMessages.length > maxRecent) recentUserMessages.shift();
+      // 线索槽输入：这一轮在聊什么（决定"想起哪件旧事"）
+      lastUserMessage = text;
       // 阶段一：记录回合长度（描述性注入用：AI 可见自己的回复与用户消息的长度对比）
       recordRound({ userLen: text.length, aiLen: null });
       // 阶段一：优先识别"用户对 AI 表达/风格的反馈"（补感知缺口），否则走普通经历提取
@@ -863,7 +894,10 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       async execute(args) {
         const k = Math.min(20, Math.max(1, Math.trunc(args.limit ?? 5)));
         const snap = await selfModel.load();
-        const { text, events } = await memory.buildInjection(k, snap ?? undefined);
+        const { text, events } = await memory.buildInjection(k, snap ?? undefined, {
+          // 主题检索时把主题当线索；否则用当前消息，让"想起来"跟着当下话题走
+          cueText: args.topic ? String(args.topic) : lastUserMessage,
+        });
         if (!text) return '(no memories yet)';
         if (args.topic) {
           const q = String(args.topic).toLowerCase();
@@ -996,7 +1030,14 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       }
       if (/^review$/i.test(raw)) {
         const out = await runDailyReview();
-        if (!out) return { kind: 'error', text: '复盘执行异常，详见日志。' };
+        if (!out) {
+          return {
+            kind: 'error',
+            text: lastReviewBlocked
+              ? `复盘未执行：${lastReviewBlocked}`
+              : '复盘执行异常，详见日志。',
+          };
+        }
         return {
           kind: 'success',
           text: [

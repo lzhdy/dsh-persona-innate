@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, mkdir, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, mkdir, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonStore } from '../lib/store.js';
@@ -44,6 +44,26 @@ async function freshStore() {
   const store = new JsonStore(tempFs(dir), dir);
   store.root = dir; // 测试读取落盘文件用
   return store;
+}
+
+/** v0.5：events 改为按月分片 JSONL，读取全部事件（替代直接读 events.json） */
+async function readAllEvents(root) {
+  const dir = join(root, 'events');
+  let names = [];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names.filter((n) => n.endsWith('.jsonl')).sort()) {
+    const raw = await readFile(join(dir, name), 'utf-8');
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (t) out.push(JSON.parse(t));
+    }
+  }
+  return out;
 }
 
 test('验收1：跨会话记得共同经历', async () => {
@@ -92,9 +112,10 @@ test('验收3：记忆写入带 provenance 来源字段且降权生效', async (
   await mem.addEvent({ topic: 'B', summary: '工具抓取的页面内容', provenance: 'tool_output', importance: 1.0 });
   await mem.addEvent({ topic: 'C', summary: '从网页检索到的内容', provenance: 'retrieved_content', importance: 1.0 });
 
-  // 来源字段落盘
-  const raw = JSON.parse(await readFile(join(store.root, 'events.json'), 'utf-8'));
-  for (const e of raw.events) {
+  // 来源字段落盘（v0.5：按月分片 JSONL）
+  const stored = await readAllEvents(store.root);
+  assert.equal(stored.length, 3, '三条事件应全部落盘');
+  for (const e of stored) {
     assert.ok(['user_direct', 'tool_output', 'retrieved_content', 'inferred'].includes(e.provenance), `provenance 字段存在且合法：${e.provenance}`);
   }
 

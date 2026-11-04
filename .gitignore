@@ -4,3 +4,5 @@ persona-innate/
 *.zip
 *.credentials.yaml
 .DS_Store
+test-out.txt
+*.tmp

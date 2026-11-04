@@ -16,6 +16,8 @@ export interface MockScriptEntry {
 /** 确定性 mock LLM：按脚本顺序匹配 prompt，命中即返回；无命中走 fallback */
 export declare class MockLlm implements LlmClient {
     private readonly script;
+    /** 脚本化实现标记：复盘据此拒绝把 mock 文本写进真实自我模型 */
+    readonly synthetic = true;
     constructor(script?: MockScriptEntry[]);
     complete(input: {
         role?: LlmRole;

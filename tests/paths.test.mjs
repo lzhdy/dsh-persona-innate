@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { resolveDataDir } from '../lib/paths.js';
 
 const SUBDIR = join('.dsh', 'persona-innate');
@@ -26,9 +26,12 @@ test('空字符串（显式无效）→ warn 并回退，source=empty-fallback',
 });
 
 test('显式绝对路径 → 尊重，source=explicit', () => {
-  const r = resolveDataDir('/var/data/my-persona', warn);
+  const input = '/var/data/my-persona';
+  const r = resolveDataDir(input, warn);
   assert.equal(r.source, 'explicit');
-  assert.equal(r.root, '/var/data/my-persona');
+  // win32 下 resolve() 会把 POSIX 绝对路径映射到当前盘符（C:\var\...），这是平台语义，
+  // 断言的是"显式路径被尊重且归一化"，不是"resolve 是恒等函数"。
+  assert.equal(r.root, process.platform === 'win32' ? resolve(input) : input);
 });
 
 test('显式路径支持 ~/ 展开（非 win32）', () => {
@@ -40,10 +43,12 @@ test('显式路径支持 ~/ 展开（非 win32）', () => {
 
 test('$DSH_HOME 环境变量：自动路径落到该 home 下', () => {
   const prev = process.env.DSH_HOME;
-  process.env.DSH_HOME = '/tmp/fake-dsh-home';
+  const fakeHome = '/tmp/fake-dsh-home';
+  process.env.DSH_HOME = fakeHome;
   try {
     const r = resolveDataDir(undefined, warn);
-    assert.equal(r.root, join('/tmp/fake-dsh-home', 'persona-innate'));
+    // 期望值同样按平台语义归一化（win32 → C:\tmp\fake-dsh-home）
+    assert.equal(r.root, join(process.platform === 'win32' ? resolve(fakeHome) : fakeHome, 'persona-innate'));
   } finally {
     if (prev === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = prev;
