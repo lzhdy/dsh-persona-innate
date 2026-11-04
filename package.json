@@ -24,7 +24,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "test:only": "node --test tests/*.test.mjs"
+    "test:only": "node --test tests/*.test.mjs",
+    "audit": "node scripts/audit-capabilities.mjs",
+    "audit:write": "node scripts/audit-capabilities.mjs --write"
   },
   "keywords": [
     "dsh",
