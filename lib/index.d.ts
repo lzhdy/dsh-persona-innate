@@ -7,6 +7,7 @@
  * - 记忆注入：ctx.systemPrompt.context（易变内容 → 动态上下文，保住 KV Cache 前缀）
  * - 模型可写记忆：persona_note 工具（自源通道，剥离检查后落库）
  * - 模型可查记忆：persona_recall 工具
+ * - 模型可看自己的能力边界：persona_pocket 工具（运行时由注册表算出，不建任何配置/清单）
  * - 用户侧：/persona 命令（status / profile / state / review / audit）
  * - 画像：首次启动无预设采样 N 轮 → 评估默认模式 → 内部文件（不注入系统提示词）
  * - M1：state 写 self_model（onRuleChange 叙事解释）；复盘每日 reviewHour 静默执行；
@@ -143,5 +144,19 @@ export declare class PersonaMemoryService {
         reinforcement: number;
     }>;
 }
+/**
+ * 观测会话事件里的工具调用，维护"工具健康"两张表。
+ *
+ * 与 `handleUserMessage` 同一风格：整个函数体 try/catch 吞掉异常。
+ * 理由一样——这是旁路观测，任何失败都不该让主链路（一轮对话）崩掉。
+ *
+ * 原始事件形状：`{ type: string, data: Record<string, unknown> }`
+ * - `tool/call`：`data.callId` / `data.name`；
+ * - `tool/result`：`data.message.source.callId`（ToolResultMessage 的来源里带调用 id），
+ *   `data.error`（失败身份，只在失败时出现）与 `message.isError`。
+ *
+ * @param event - dsh-session 广播的原始事件
+ */
+export declare function observeToolEvent(event: unknown): void;
 export declare function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>): void;
 //# sourceMappingURL=index.d.ts.map

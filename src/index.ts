@@ -7,6 +7,7 @@
  * - 记忆注入：ctx.systemPrompt.context（易变内容 → 动态上下文，保住 KV Cache 前缀）
  * - 模型可写记忆：persona_note 工具（自源通道，剥离检查后落库）
  * - 模型可查记忆：persona_recall 工具
+ * - 模型可看自己的能力边界：persona_pocket 工具（运行时由注册表算出，不建任何配置/清单）
  * - 用户侧：/persona 命令（status / profile / state / review / audit）
  * - 画像：首次启动无预设采样 N 轮 → 评估默认模式 → 内部文件（不注入系统提示词）
  * - M1：state 写 self_model（onRuleChange 叙事解释）；复盘每日 reviewHour 静默执行；
@@ -30,6 +31,15 @@ import { createSerialQueue, decayForIdleGap } from './state-decay.js';
 import { runDriftAudit, runLongRangeConsistency, runHonestyBaseline, buildAuditScenarios } from './eval.js';
 import { runImportChat, ImportError, type ImportErrorCode } from './import-chat.js';
 import { resolveDataDir } from './paths.js';
+import { localDateString } from './time.js';
+import {
+  missingTools,
+  renderPocket,
+  updateLedger,
+  type PocketFailure,
+  type PocketLedger,
+  type PocketTool,
+} from './pocket.js';
 import {
   mkdir as nodeMkdir,
   readFile as nodeReadFile,
@@ -343,6 +353,96 @@ function currentModel(ctx: Context, config: Schemastery.TypeT<typeof Config>): s
     /* 忽略 */
   }
   return '';
+}
+
+/* ════════════ 口袋：工具健康观测（进程级状态） ════════════
+ *
+ * 为什么这两个可以放在模块级（而不是像注入缓存那样按会话键控）：
+ * 它们记的是**工具本身的健康**——"某个工具最近一次调用是否失败"。
+ * 这是宿主的客观事实，既不是对话内容，也不属于某个用户，
+ * 所以跨会话共享才是对的语义：A 会话发现某工具坏了，B 会话也该知道。
+ * （反过来，`injectedText` 那四个注入缓存装的是对话内容，跨会话共享就是串台。）
+ *
+ * 都不落盘：失败留痕的价值只在"最近"，进程重启后重新观测即可；
+ * ledger（见过哪些工具）才需要落盘，因为它跨天才有意义。
+ */
+let pocketFailures = new Map<string, PocketFailure>();
+/** callId -> 工具名：tool/result 只带 callId，得靠它反查是谁失败了。上限 256，超了删最老的。 */
+const toolCallNames = new Map<string, string>();
+const POCKET_MAX_TRACKED_CALLS = 256;
+/** 失败留痕的有效期：超过就当作"以前坏过、现在不知道" */
+const POCKET_FAILURE_WINDOW_MS = 7 * 86_400_000;
+const POCKET_REASON_MAX = 120;
+
+/** 从 tool/result 的 error 里抠一句人读的原因（`String(对象)` 只会得到 `[object Object]`） */
+function failureReason(error: unknown): string {
+  if (typeof error === 'string') return error.trim();
+  if (error && typeof error === 'object') {
+    const e = error as { reason?: unknown; message?: unknown; code?: unknown; name?: unknown };
+    for (const v of [e.reason, e.message, e.code, e.name]) {
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    return '';
+  }
+  return '';
+}
+
+/**
+ * 观测会话事件里的工具调用，维护"工具健康"两张表。
+ *
+ * 与 `handleUserMessage` 同一风格：整个函数体 try/catch 吞掉异常。
+ * 理由一样——这是旁路观测，任何失败都不该让主链路（一轮对话）崩掉。
+ *
+ * 原始事件形状：`{ type: string, data: Record<string, unknown> }`
+ * - `tool/call`：`data.callId` / `data.name`；
+ * - `tool/result`：`data.message.source.callId`（ToolResultMessage 的来源里带调用 id），
+ *   `data.error`（失败身份，只在失败时出现）与 `message.isError`。
+ *
+ * @param event - dsh-session 广播的原始事件
+ */
+export function observeToolEvent(event: unknown): void {
+  try {
+    if (!event || typeof event !== 'object') return;
+    const { type, data } = event as { type?: unknown; data?: unknown };
+    if (typeof type !== 'string' || !data || typeof data !== 'object') return;
+    const d = data as Record<string, unknown>;
+
+    if (type === 'tool/call') {
+      const callId = typeof d.callId === 'string' ? d.callId : '';
+      const toolName = typeof d.name === 'string' ? d.name : '';
+      if (!callId || !toolName) return;
+      // 先删再插：保证 Map 的迭代顺序等于"最近使用顺序"，淘汰的才是真正最老的
+      toolCallNames.delete(callId);
+      toolCallNames.set(callId, toolName);
+      while (toolCallNames.size > POCKET_MAX_TRACKED_CALLS) {
+        const oldest = toolCallNames.keys().next();
+        if (oldest.done) break;
+        toolCallNames.delete(oldest.value);
+      }
+      return;
+    }
+
+    if (type === 'tool/result') {
+      const message = d.message as { source?: { callId?: unknown }; isError?: unknown } | undefined;
+      const callId = typeof message?.source?.callId === 'string' ? message.source.callId : '';
+      if (!callId) return;
+      const toolName = toolCallNames.get(callId);
+      // 进程内没记录过这次调用（重启后重放历史、或别的进程发的）：不做无依据的归因
+      if (!toolName) return;
+      // 失败判据：`data.error`（失败身份）或 `message.isError`。
+      // 只认 `error` 会把"报了错但没带 error 字段"的真失败当成恢复，所以两个都看。
+      const failed = Boolean(d.error) || message?.isError === true;
+      if (failed) {
+        const reason = failureReason(d.error) || '调用失败';
+        pocketFailures.set(toolName, { name: toolName, at: Date.now(), reason: reason.slice(0, POCKET_REASON_MAX) });
+      } else {
+        // 恢复即清除：一次成功就说明它现在好使，旧失败不该继续吓唬模型
+        pocketFailures.delete(toolName);
+      }
+    }
+  } catch {
+    /* 旁路观测：失败静默，绝不影响主流程 */
+  }
 }
 
 export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
@@ -960,6 +1060,8 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   ctx.on('session/event', (_session, event) => {
     void handleUserMessage(event);
     void handleAssistantMessage(event);
+    // 口袋：顺手记下"哪个工具刚失败过"（旁路观测，失败静默）
+    void observeToolEvent(event);
   });
 
   /* ════════════ M3：AI 自身表达提取（assistant 通道，记忆架构口径修正） ════════════
@@ -1148,6 +1250,87 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
         });
         return { ok: !res.rejected, reason: res.reason };
       },
+    }),
+  );
+
+  /**
+   * persona_pocket：看自己口袋里有哪些工具（只读，可并发）。
+   *
+   * 唯一事实源是 `ctx.tools.schemas(exec.agent)`——dsh-tools 的公开方法，按调用方
+   * scope 投影"这个 agent 现在真正能看见的工具"。因此插件卸载、工具被 scope 限制、
+   * 配置换了一套能力之后，这里看到的东西立刻跟着变，不需要任何清理逻辑，
+   * 也没有第二份需要同步的清单。
+   *
+   * 三块信息各自的来源：
+   * - 当前有什么：上面的 schemas()；
+   * - 掉了什么：pocket-ledger.json（只记"名字 -> 上次见到的日期"，不记权限）；
+   * - 什么不好使：observeToolEvent 在 session/event 上观测到的最近失败（进程内）。
+   */
+  ctx.tools.register(
+    defineTool({
+      name: 'persona_pocket',
+      description:
+        'Look inside your own pocket: what you can actually use right now, what disappeared since you last saw it, and what recently failed. Check here before assuming you can or cannot do something.',
+      parameters: {
+        detail: { type: 'boolean', description: 'Include a one-line description for each tool (default false).' },
+        group: { type: 'string', description: 'Only show tools whose name starts with this prefix, e.g. "qqbot".' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute(args, exec) {
+        // schemas() 是 dsh-tools 的公开方法，但宿主版本差异下可能不存在：
+        // 这里降级成空数组并说明，绝不因为"看不到"就抛错（看不到本身也是一种信息）
+        const svc = ctx.tools as unknown as { schemas?: (scope?: object) => PocketTool[] };
+        let tools: PocketTool[] = [];
+        let noToolView = false;
+        if (typeof svc.schemas === 'function') {
+          try {
+            tools = svc.schemas(exec.agent) ?? [];
+          } catch (err) {
+            ctx.logger.warn('[persona-innate] persona_pocket 读取工具视图失败：%s', String(err));
+            tools = [];
+            noToolView = true;
+          }
+        } else {
+          noToolView = true;
+        }
+
+        let ledger: PocketLedger = { seen: {} };
+        try {
+          ledger = (await store.readJson<PocketLedger>('pocket-ledger.json')) ?? { seen: {} };
+        } catch (err) {
+          // ledger 损坏不该让"我有什么"也一起看不见：降级成空账本，本轮照常报当前能力
+          ctx.logger.warn('[persona-innate] pocket-ledger.json 解析失败，按空账本处理：%s', String(err));
+        }
+
+        const today = localDateString(new Date());
+        const names = tools.map((t) => t.name);
+        // missing 用**旧**账本算：新账本里 present 已被刷成今天，就比不出"掉了"
+        const missing = missingTools(ledger, names, today);
+        const nextLedger = updateLedger(ledger, names, today);
+
+        const now = Date.now();
+        const failures = [...pocketFailures.values()]
+          .filter((f) => !!f && typeof f.name === 'string')
+          // 只报"还在口袋里的工具"的失败：已经掉了的工具归【掉了】那块说
+          .filter((f) => names.includes(f.name) && now - f.at <= POCKET_FAILURE_WINDOW_MS)
+          .sort((a, b) => b.at - a.at);
+
+        // 写账本失败不影响本次返回：这次看到的能力是真的，账本只是给下次比对的记忆
+        void store.writeJson('pocket-ledger.json', nextLedger).catch(() => {});
+
+        const text = renderPocket({
+          tools,
+          missing,
+          failures,
+          detail: args.detail === true,
+          group: typeof args.group === 'string' ? args.group : undefined,
+        });
+        return noToolView ? `${text}\n\n（当前宿主不提供工具视图）` : text;
+      },
+      isConcurrencySafe: () => true,
     }),
   );
 
