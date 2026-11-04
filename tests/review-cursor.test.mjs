@@ -482,8 +482,7 @@ test('v0.7-B8: 启动补跑带上界 until —— 本次会话刚写的事件不
   assert.ok(nextSeen.includes('e_live'), `启动后写入的事件必须被下一次复盘收走，实际：${JSON.stringify(nextSeen)}`);
 });
 
-test('v0.7-B8b: 补跑窗口为空（启动前没有新事件）→ skipped，不推进游标、不调用 LLM', async () => {
-  const store = await freshStore();
+test('v0.7-B8b: 补跑窗口为空（启动前没有新事件）→ skipped，不推进游标、不调用 LLM', async () => {  const store = await freshStore();
   const cursorStore = new ReviewCursorStore(store);
   const readyAtMs = Date.now();
 
@@ -499,4 +498,86 @@ test('v0.7-B8b: 补跑窗口为空（启动前没有新事件）→ skipped，�
   });
 
   assert.equal(outcome.kind, 'skipped');
+});
+
+/* ── 9. 定时器没跑成（关机）：窗口是时间区间，不是"今天" ─────────── */
+
+test('v0.7-B9: 02:00 电脑关机，次日手动复盘必须覆盖错过的整天（不按日期切）', async () => {
+  // 用户的真实担心：定时复盘没跑，第二天手动跑会不会"只复盘当日窗口"，
+  // 把昨天整个挡在外面。答案必须是否——窗口是 (游标, 现在) 的时刻区间，
+  // 与日历日无关；date 只是输出上的标签（changeNote/"每日复盘 X"），从不参与筛选。
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+
+  // 上次复盘：11-03 凌晨 02:00
+  const lastReview = new Date(2026, 10, 3, 2, 0, 0);
+  await cursorStore.save({ version: 1, lastReviewAt: lastReview.toISOString() });
+
+  // 11-03 一整天的事件 + 11-04 早上开机后的事件
+  const events = [
+    ev('e_d3_morning', new Date(2026, 10, 3, 10, 0, 0).toISOString()),
+    ev('e_d3_night', new Date(2026, 10, 3, 23, 0, 0).toISOString()),
+    ev('e_d4_early', new Date(2026, 10, 4, 9, 15, 0).toISOString()),
+  ];
+
+  // 11-04 02:00 机器不在；09:30 开机后手动 /persona review
+  const now = new Date(2026, 10, 4, 9, 30, 0);
+  const seen = [];
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: events,
+    now,
+    review: async ({ events: win, date }) => {
+      seen.push(...win.map((e) => e.id));
+      // 标签是"今天"，但窗口跨了两天——这正是本次要钉住的一点
+      assert.equal(date, '2026-11-04', '标签按复盘当天算');
+      return fakeOut(date);
+    },
+  });
+
+  assert.equal(outcome.kind, 'done');
+  assert.deepEqual(
+    seen,
+    ['e_d3_morning', 'e_d3_night', 'e_d4_early'],
+    '昨天整天的事件必须一起纳入，不能只取"今天"',
+  );
+
+  const saved = await cursorStore.load();
+  assert.ok(saved.ok && saved.cursor);
+  assert.equal(saved.cursor.lastReviewAt, now.toISOString(), '游标推进到本次复盘时刻');
+});
+
+test('v0.7-B9b: 连续关机多天 → 一次覆盖整段，但不会超过单次上限', async () => {
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+  // 上次复盘在 5 天前
+  const lastReview = new Date(2026, 10, 3, 2, 0, 0);
+  await cursorStore.save({ version: 1, lastReviewAt: lastReview.toISOString() });
+
+  // 这 5 天里每天 50 条 → 250 条，超过 200 上限
+  const events = [];
+  for (let d = 0; d < 5; d += 1) {
+    for (let i = 0; i < 50; i += 1) {
+      const t = new Date(2026, 10, 3, 3, 0, 0).getTime() + (d * 24 * 60 + i) * 60_000;
+      events.push(ev(`e_d${d}_${i}`, new Date(t).toISOString()));
+    }
+  }
+  const now = new Date(2026, 10, 8, 9, 30, 0);
+
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: events,
+    now,
+    review: async ({ events: win }) => fakeOut('2026-11-08'),
+  });
+
+  assert.equal(outcome.kind, 'done');
+  assert.equal(outcome.window.length, REVIEW_WINDOW_MAX, '一次最多 200 条');
+  assert.equal(outcome.truncatedEarlier, 50, '更早的 50 条如实报数，不静默丢弃');
+  // 关键：游标仍推进到 now —— 被截断的更早事件不会在下一轮重复
+  const saved = await cursorStore.load();
+  assert.ok(saved.ok && saved.cursor);
+  assert.equal(saved.cursor.lastReviewAt, now.toISOString());
 });
