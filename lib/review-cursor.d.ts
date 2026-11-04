@@ -18,6 +18,7 @@
  */
 import type { PersonaEvent, ReviewOutput } from './types.js';
 import type { KVStore } from './store.js';
+export { localDayStart, localDateString } from './time.js';
 /** 游标文件（store root 下；硬状态，用原子写） */
 export declare const REVIEW_CURSOR_PATH = "review-state.json";
 /**
@@ -52,10 +53,6 @@ export declare class ReviewCursorStore {
     load(): Promise<CursorLoadResult>;
     save(cursor: ReviewCursor): Promise<void>;
 }
-/** 本地零点（毫秒）。刻意不用 toISOString 切片：UTC 切片的"今天"在本地 02:00 前后会指向前一天 */
-export declare function localDayStart(now: Date): number;
-/** 本地日期串 YYYY-MM-DD（只作标签/审计，不参与窗口计算） */
-export declare function localDateString(now: Date): string;
 /**
  * 复盘窗口：游标时刻（开区间）→ 现在。
  * 时间戳不可解析的事件直接排除（无法确定它属于哪段窗口）。

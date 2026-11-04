@@ -11,8 +11,11 @@
  */
 import type { PersonaEvent } from './types.js';
 import { SALIENCE_WEIGHT, traceableInferred } from './provenance.js';
+import { MS_PER_DAY, localDayDiff } from './time.js';
 
-export const MS_PER_DAY = 86_400_000;
+/** 一天的毫秒数（从 time.ts 转出：memory-facts 等模块从这里取，保持引用面不变） */
+export { MS_PER_DAY } from './time.js';
+
 /** 时间衰减半衰期（天）。起步值，待观察期校准 */
 export const DEFAULT_TAU_DAYS = 14;
 /** 近因槽窗口（小时） */
@@ -152,11 +155,18 @@ export function cueSimilarity(
 
 /* ───────────── 描述性时间标注 ───────────── */
 
-/** 相对时间描述（注入用描述性事实，不是指令） */
+/**
+ * 相对时间描述（注入用描述性事实，不是指令）。
+ *
+ * 口径：**本地日历日之差**，不是"经过的 24 小时"。
+ * 旧实现用 `Math.floor((now - t) / MS_PER_DAY)`，于是"昨晚 21:14"在今天下午 15:03
+ * 注入时只过了 17.8 小时，被标成「今天」——模型会把昨天下午的事当成刚发生的。
+ * 判定口径与 `review-cursor` 的复盘窗口统一到 `time.ts`。
+ */
 export function relativeDayLabel(iso: string, now: number): string {
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return '';
-  const days = Math.floor((now - t) / MS_PER_DAY);
+  const days = localDayDiff(t, now);
   if (days <= 0) return '今天';
   if (days === 1) return '昨天';
   if (days < 7) return `${days} 天前`;

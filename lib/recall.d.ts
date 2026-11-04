@@ -10,7 +10,8 @@
  *   token 预算固定，不随记忆增长膨胀。
  */
 import type { PersonaEvent } from './types.js';
-export declare const MS_PER_DAY = 86400000;
+/** 一天的毫秒数（从 time.ts 转出：memory-facts 等模块从这里取，保持引用面不变） */
+export { MS_PER_DAY } from './time.js';
 /** 时间衰减半衰期（天）。起步值，待观察期校准 */
 export declare const DEFAULT_TAU_DAYS = 14;
 /** 近因槽窗口（小时） */
@@ -60,7 +61,14 @@ export declare function cueSimilarity(a: string, b: string): {
     score: number;
     shared: number;
 };
-/** 相对时间描述（注入用描述性事实，不是指令） */
+/**
+ * 相对时间描述（注入用描述性事实，不是指令）。
+ *
+ * 口径：**本地日历日之差**，不是"经过的 24 小时"。
+ * 旧实现用 `Math.floor((now - t) / MS_PER_DAY)`，于是"昨晚 21:14"在今天下午 15:03
+ * 注入时只过了 17.8 小时，被标成「今天」——模型会把昨天下午的事当成刚发生的。
+ * 判定口径与 `review-cursor` 的复盘窗口统一到 `time.ts`。
+ */
 export declare function relativeDayLabel(iso: string, now: number): string;
 /**
  * 五槽装配：近因 / 未结 / 线索 / 自我 / 轮廓，各至多一条，剩余名额按显著性补足。

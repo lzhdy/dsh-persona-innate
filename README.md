@@ -1,6 +1,6 @@
 # dsh-persona-innate（M0 + M1 自我成长 + M2 自动记忆 + M3 双通道记忆 + 记忆层 v0.5）
 
-DSH 自主成长型拟人陪伴插件 · 当前版本 **0.5.2（记忆层重建）**。对应《DSH 自主成长型拟人陪伴插件 · 机制设计文档》M0/M1/M2/M3 行；机制文档已随仓库提供：`docs/mechanism-design.md`。
+DSH 自主成长型拟人陪伴插件 · 当前版本 **0.5.3（记忆层重建）**。对应《DSH 自主成长型拟人陪伴插件 · 机制设计文档》M0/M1/M2/M3 行；机制文档已随仓库提供：`docs/mechanism-design.md`。
 
 > **0.5.2 修复（首次复盘死锁）**：没有游标时窗口下界是"今天 00:00"，而定时复盘在 02:00 跑——窗口恒为空 → 按"空窗口不推进游标"→ 游标永远是 `null`，**首次复盘永远不发生**，升级前的历史事件也永不被归纳。改为"无游标时从最早一条事件起"（闭区间）+ 单次上限 200 条（超出从最早端截断，日志与 `/persona review` 明示"有 N 条更早的未纳入"）。详见 [0.5.2 Changelog](#052-changelog)。
 
@@ -158,7 +158,7 @@ npm run build && node --test tests/*.test.mjs   # 214/214 通过
 
 # 打包并装入 DSH profile
 npm pack
-dsh plugin --profile web add dsh-persona-innate-0.5.2.tgz
+dsh plugin --profile web add dsh-persona-innate-0.5.3.tgz
 dsh --profile web --dump-config
 ```
 
@@ -252,6 +252,42 @@ dsh --profile web --dump-config
 ### 已知遗留（本次未改）
 
 `selectReviewWindow` 在**无游标**时用 `localDayStart(now)` 作窗口下界，即"从今天 00:00 起"。首次安装或升级后若历史事件全在今天之前，窗口为空 → 按"空窗口不推进"的设计不会补跑。是否该在无游标时改为"取全部历史"需要单独拍板。**→ 0.5.2 已拍板并修复。**
+
+## 0.5.3 Changelog
+
+修**相对日期标注**：注入里把"昨天"写成"今天"。**227/227 测试通过**（0.5.2 为 219，新增 8 条）。
+
+### 问题：`2026-11-03（今天）`
+
+在真实运行中抓到的：11-04 15:03 的一次注入里，11-03 21:14 的事件被标成 `2026-11-03（今天）`。
+
+`recall.ts` 的 `relativeDayLabel` 用的是**经过的 24 小时整除**：
+
+```ts
+const days = Math.floor((now - t) / MS_PER_DAY);   // 17.8 小时 → 0 → "今天"
+```
+
+而同一个代码库里，`review-cursor.ts:88` 的 `localDayStart` 对"今天"用的是**本地零点**，注释还专门写了"UTC 切片的今天在本地 02:00 前后会指向前一天"。
+
+同一个词，两套语义。对人格插件这不是排版问题：它让模型把昨天下午的事当成刚发生的，直接影响"这件事还热不热"的判断。
+
+### 修法：把时间语义收到一处
+
+新增 `src/time.ts` 作为唯一事实源，提供 `localDayStart`（本地零点）、`localDayIndex`（本地日历日序号）、`localDayDiff`（差几天）、`localDateString`。`review-cursor.ts` 改为从这里导入并 re-export（既有引用面不变），`recall.ts` 的 `relativeDayLabel` 改用 `localDayDiff`。
+
+`localDayIndex` 的实现要点：`getTimezoneOffset()` 是"本地 → UTC 要加的分钟数"（东八区为 -480），所以 `ms - offset*60000` 得到的是**本地墙上时间的 UTC 表示**，再按 24h 取整即为本地日索引。因此 11-03 23:59 与 11-04 00:01 相差 1 天，而不是 0。
+
+### 为什么这次没被测试挡住
+
+因为**从来没有测试覆盖 `relativeDayLabel`**——它是注入文案的装饰函数，看起来"不影响逻辑"。但注入文案就是模型看到的全部输入，装饰函数错了，模型的时间感就错了。
+
+新增 `tests/time.test.mjs` 8 条，其中 `v0.5.3-T4` 直接钉住这次的误判场景（昨晚 21:14 在今天 15:03 必须是「昨天」），`v0.5.3-T3` 钉住跨零点只差 2 分钟也必须算 1 天。
+
+### 顺带发现
+
+`MS_PER_DAY` 在 `recall.ts`、`event-log.ts` 里各定义了一份，`memory-facts.ts` 从 `recall.ts` 引用。本次只把 `recall.ts` 的那份转出到 `time.ts` 并保持 re-export，**没有动 `event-log.ts`**——同名常量两处定义是同类隐患，留待后续统一（不夹带在这次修复里）。
+
+---
 
 ## 0.5.2 Changelog
 

@@ -18,6 +18,11 @@
  */
 import type { PersonaEvent, ReviewOutput } from './types.js';
 import type { KVStore } from './store.js';
+import { localDayStart, localDateString } from './time.js';
+
+// 时间语义统一在 time.ts（同一个"今天"只能有一个定义）。
+// 这里 re-export 是为了不打断既有引用面：tests/review-cursor.test.mjs 直接从这里取。
+export { localDayStart, localDateString } from './time.js';
 
 /** 游标文件（store root 下；硬状态，用原子写） */
 export const REVIEW_CURSOR_PATH = 'review-state.json';
@@ -83,17 +88,6 @@ export class ReviewCursorStore {
   async save(cursor: ReviewCursor): Promise<void> {
     await this.store.writeTextAtomic(this.path, JSON.stringify(cursor, null, 2));
   }
-}
-
-/** 本地零点（毫秒）。刻意不用 toISOString 切片：UTC 切片的"今天"在本地 02:00 前后会指向前一天 */
-export function localDayStart(now: Date): number {
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-}
-
-/** 本地日期串 YYYY-MM-DD（只作标签/审计，不参与窗口计算） */
-export function localDateString(now: Date): string {
-  const p = (n: number): string => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 
 /**
