@@ -1,6 +1,6 @@
 {
   "name": "dsh-persona-innate",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "DSH 自主成长拟人插件 M0+M1+M2+M3：先天画像 + events 记忆（provenance）+ 指令剥离 + 每轮注入 + 状态机/复盘 + 自动记忆提取 + 双通道记忆（诱导防线/imported 导入）",
   "type": "module",
   "main": "lib/index.js",

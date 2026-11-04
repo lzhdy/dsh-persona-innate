@@ -69,7 +69,9 @@ declare module '@deepseek-ai/cordis' {
     agentDefaultModel?: unknown;
   }
   interface Events {
-    'app/ready'(): void;
+    /** 注意：这里曾经声明并监听 `app/ready`，但 DSH 并不发这个事件
+     * （dsh-app-boot 只 emit `app-boot/config-reload`，cordis 也无 ready 事件），
+     * 导致启动块在真实环境下从未执行。启动工作已改为挂载时触发，见 runBootTasks。 */
     /** dsh-session 广播：会话日志追加（含 user/message）；本插件只读监听，无需注入 session 服务 */
     'session/event'(session: unknown, event: unknown): void;
   }
@@ -109,6 +111,12 @@ export const Config = z.object({
 
 /** 暴露给其他插件/命令的领域服务（薄门面：命令/工具不直接碰存储） */
 export class PersonaMemoryService {
+  /** 启动工作完成信号（注入预热 / LLM 预热 / 画像采样 / 启动补跑）。
+   * DSH 没有 app-ready 事件，启动改在挂载时触发；调用方 await 它做确定性等待，
+   * 不要再用 setTimeout 猜时序（测试尤其如此）。 */
+  readonly booted: Promise<void>;
+  private resolveBooted!: () => void;
+
   constructor(
     readonly memory: PersonaMemory,
     /** M1：自我模型服务（版本化叙事，可回滚） */
@@ -117,7 +125,16 @@ export class PersonaMemoryService {
     readonly stateMachine: PersonaStateMachine,
     private readonly loadProfile: () => Promise<import('./types.js').InnateProfile | null>,
     private readonly triggerSample: () => Promise<import('./types.js').InnateProfile | null>,
-  ) {}
+  ) {
+    this.booted = new Promise<void>((resolve) => {
+      this.resolveBooted = resolve;
+    });
+  }
+
+  /** 启动流程结束时调用（幂等：Promise 只会兑现一次） */
+  markBooted(): void {
+    this.resolveBooted();
+  }
 
   async status() {
     const events = await this.memory.list();
@@ -710,7 +727,7 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
    * 只在"确实有一整段未复盘事件"时触发——每次启动都补的代价是多一次 LLM 调用
    * 与一个 self_model 版本，而 DSH 一天可能启动十几次。
    *
-   * `readyAt` 是窗口上界，由 app/ready 同步取的时刻传进来（见下方 once 回调）。
+   * `readyAt` 是窗口上界，由插件挂载时同步取的 `bootAt` 传进来（启动工作见下方 runBootTasks）。
    * 补跑补的是"进程不在期间"的缺口；本次会话刚写入的事件不算缺口——
    * 它们既不该让补跑白花一次 LLM 调用，也不该和紧随其后的手动 /persona review
    * 抢同一个窗口（抢输了手动那条会拿到"上一次复盘仍在进行中"）。
@@ -770,9 +787,25 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   );
   ctx.provide('personaMemory', service);
 
+  /* ════════════ 启动工作（替代 app/ready） ════════════
+   * DSH 没有 app-ready 类事件：dsh-app-boot 只 emit `app-boot/config-reload`，
+   * cordis 也没有 ready 事件。此前两段 `ctx.once('app/ready')` 因此在真实环境下
+   * 从不执行——运行期用 CDP 查过，两个 once 钩子一直挂在事件表上没被消费，
+   * 连带 EventLog.cache 始终为 null（记忆从未载入）。测试没抓到是因为用例自己
+   * 手动 root.emit('app/ready')，把不存在的集成点模拟成了存在的。
+   *
+   * 改为：挂载时同步取时刻 → 有 llm 就立即跑，没有等 llm 服务 → 再兜底 30s，
+   * 保证任何情况下都不会"静默什么都不做"。 */
+
+  /** 启动时刻：同步捕获，先于任何 await。
+   * 补跑拿它当窗口上界——晚取会把"启动后几毫秒内写入的事件"当成历史补进去。 */
+  const bootAt = new Date();
+
+  let bootStarted = false;
+  let bootFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** 画像采样（首次启动 / 模型变化重估）；LLM 缺失时降级为待采样 */
-  ctx.once('app/ready', async () => {
-    await refreshInjection();
+  const sampleProfileIfNeeded = async (): Promise<void> => {
     const model = currentModel(ctx, config);
     const profile = await loadInnateProfile(store, model);
     if (profile && !profile.needsReestimate) {
@@ -794,32 +827,62 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     } catch (err) {
       ctx.logger.error(err);
     }
-  });
+  };
 
-  /** M1 注入预热：状态 + 自我模型摘要（失败降级为空文本，不阻塞启动） */
-  ctx.once('app/ready', async () => {
-    // 启动时刻：第一句就取，不放在任何 await 之后——补跑要用它当窗口上界，
-    // 一旦晚取，"启动后几毫秒内写入的事件"会被补跑当成历史事件收进去。
-    const readyAt = new Date();
-    // 顺带预热 LLM 解析。resolveLlm 为同步接口（复盘 getter 需要同步返回），
-    // 首次调用会先给 MockLlm、真实 adapter 就绪后替换——不预热的话，
-    // 进程内第一次复盘拿到的就是 mock（随后被门禁拦掉，等于白跑一次）。
-    resolveLlm();
-    if (llmPromise) {
-      try {
-        await llmPromise;
-      } catch (err) {
-        ctx.logger.warn('[persona-innate] LLM 预热失败：%s', String(err));
-      }
-    }
+  /** 阶段一：不依赖 LLM 的注入预热（记忆 / 状态 / 自我模型摘要）。
+   * 挂载即跑——正是这一段的"零依赖"保证了启动代码不会再整块静默不执行。
+   * 失败降级为空文本，不阻塞启动。 */
+  const warmInjections = async (): Promise<void> => {
     try {
-      await Promise.all([refreshStateInjection(), refreshSelfModelInjection()]);
+      await Promise.all([refreshInjection(), refreshStateInjection(), refreshSelfModelInjection()]);
     } catch (err) {
       ctx.logger.error(err);
     }
-    // v0.7：启动补跑（fire-and-forget，不阻塞 ready）。
-    // 放在 LLM 预热之后：否则第一次补跑拿到的是 mock，会被门禁拦掉、白白推迟一天。
-    void maybeCatchUpReview(readyAt);
+  };
+
+  /** 阶段二：依赖 LLM 的启动工作——预热解析、画像采样、启动补跑。只跑一次。
+   * 必须先预热再采样/补跑：否则这一轮拿到的是 mock，会被门禁拦掉、白白推迟一天。 */
+  let llmBootStarted = false;
+  const runLlmBoot = async (): Promise<void> => {
+    if (llmBootStarted) return;
+    llmBootStarted = true;
+    try {
+      // resolveLlm 是同步接口（复盘 getter 需要同步返回）：首次先给 MockLlm，
+      // 真实 adapter 就绪后替换。所以这里要 await 一次，让替换先落地。
+      resolveLlm();
+      if (llmPromise) {
+        try {
+          await llmPromise;
+        } catch (err) {
+          ctx.logger.warn('[persona-innate] LLM 预热失败：%s', String(err));
+        }
+      }
+      await sampleProfileIfNeeded();
+    } finally {
+      // 补跑放 finally：上面的步骤抛错也不能把补跑一起跳过。fire-and-forget，不阻塞。
+      void maybeCatchUpReview(bootAt);
+    }
+  };
+
+  // 启动入口。顺序上有个硬约束：inject / effect 只能在 apply 期间建立，context 一旦
+  // inactive 就会抛 "cannot create effect on inactive context"。所以"等待"必须同步
+  // 建立，不能放在 await 之后。
+  if (config.llmMode === 'mock') {
+    void runLlmBoot();
+  } else {
+    // 服务已在则 cordis 立即回调，不在则等它出现——不假设存在某个"app ready"事件
+    // （DSH 没有，那正是之前整块哑掉的原因）。
+    ctx.inject(['llm'], () => {
+      void runLlmBoot();
+    });
+    if (!safeLlm(ctx)) {
+      ctx.logger.info('[persona-innate] llm 服务尚未就绪：画像采样与启动补跑推迟到它出现后执行');
+    }
+  }
+
+  // 阶段一跑完就兑现 booted——不等 LLM，调用方（命令 / 测试）不必猜时序。
+  void warmInjections().finally(() => {
+    service.markBooted();
   });
 
   /* ════════════ M2：自动记忆提取（session/event → user/message → 确定性规则） ════════════

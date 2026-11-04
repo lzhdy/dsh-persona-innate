@@ -49,7 +49,9 @@ declare module '@deepseek-ai/cordis' {
         agentDefaultModel?: unknown;
     }
     interface Events {
-        'app/ready'(): void;
+        /** 注意：这里曾经声明并监听 `app/ready`，但 DSH 并不发这个事件
+         * （dsh-app-boot 只 emit `app-boot/config-reload`，cordis 也无 ready 事件），
+         * 导致启动块在真实环境下从未执行。启动工作已改为挂载时触发，见 runBootTasks。 */
         /** dsh-session 广播：会话日志追加（含 user/message）；本插件只读监听，无需注入 session 服务 */
         'session/event'(session: unknown, event: unknown): void;
     }
@@ -118,11 +120,18 @@ export declare class PersonaMemoryService {
     readonly stateMachine: PersonaStateMachine;
     private readonly loadProfile;
     private readonly triggerSample;
+    /** 启动工作完成信号（注入预热 / LLM 预热 / 画像采样 / 启动补跑）。
+     * DSH 没有 app-ready 事件，启动改在挂载时触发；调用方 await 它做确定性等待，
+     * 不要再用 setTimeout 猜时序（测试尤其如此）。 */
+    readonly booted: Promise<void>;
+    private resolveBooted;
     constructor(memory: PersonaMemory, 
     /** M1：自我模型服务（版本化叙事，可回滚） */
     selfModel: SelfModelService, 
     /** M1：情绪状态机（效价×唤醒 + 模式 + 关系阶段） */
     stateMachine: PersonaStateMachine, loadProfile: () => Promise<import('./types.js').InnateProfile | null>, triggerSample: () => Promise<import('./types.js').InnateProfile | null>);
+    /** 启动流程结束时调用（幂等：Promise 只会兑现一次） */
+    markBooted(): void;
     status(): Promise<{
         events: number;
         strip: import("./directive-strip.js").StripStats;

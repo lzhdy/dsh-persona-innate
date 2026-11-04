@@ -1,6 +1,9 @@
 # dsh-persona-innate（M0 + M1 自我成长 + M2 自动记忆 + M3 双通道记忆 + 记忆层 v0.5）
 
-DSH 自主成长型拟人陪伴插件 · 当前版本 **0.5.0（记忆层重建）**。对应《DSH 自主成长型拟人陪伴插件 · 机制设计文档》M0/M1/M2/M3 行；机制文档已随仓库提供：`docs/mechanism-design.md`。
+DSH 自主成长型拟人陪伴插件 · 当前版本 **0.5.1（记忆层重建）**。对应《DSH 自主成长型拟人陪伴插件 · 机制设计文档》M0/M1/M2/M3 行；机制文档已随仓库提供：`docs/mechanism-design.md`。
+
+> **0.5.1 修复（重要）**：`ctx.once('app/ready', …)` 监听的是一个 **DSH 并不存在的事件**（`dsh-app-boot` 只 emit `app-boot/config-reload`，cordis 也无 ready 事件），导致启动块在真实环境下**从未执行**——启动补跑、LLM 预热、注入预热、画像采样全部静默失效，测试也没抓到（用例自己 `emit('app/ready')`）。改为挂载时触发 + `ctx.inject(['llm'])` 等服务就绪，并新增 `personaMemory.booted` 作确定性等待信号。详见 [0.5.1 Changelog](#051-changelog)。
+
 
 > **0.5.0 升级提示（含存储格式变更与自动迁移）**：events 由单文件 `events.json` 改为按月分片 `events/YYYY-MM.jsonl`，**首次启动自动迁移**并保留 `events.json.migrated` 副本与原文件指针。检索由"排序取 top-N"改为五槽配额装配。详见文末 [0.5.0 Changelog](#050-changelog)。
 >
@@ -153,7 +156,7 @@ npm run build && node --test tests/*.test.mjs   # 214/214 通过
 
 # 打包并装入 DSH profile
 npm pack
-dsh plugin --profile web add dsh-persona-innate-0.5.0.tgz
+dsh plugin --profile web add dsh-persona-innate-0.5.1.tgz
 dsh --profile web --dump-config
 ```
 
@@ -185,6 +188,7 @@ dsh --profile web --dump-config
 - **状态注入对象错位**：文档要求"供评估端与状态机使用"，实现注入了表达端（order 160，四个内部参数）。待拍板：撤出，或翻译成可感知的形态事实。
 - **证据链待收紧**：特质只增不减（纯并集）、narrative 整体替换且注入只取首句、一致性门禁不阻断 commit、多会话上下文共享闭包。
 - **O1/O36 等**：采样问题集、效价/唤醒启发式、关系阶段阈值、复盘时刻、衰减半衰与最小间隔、thread 过期天数均为初始值，实测后校准（代码内 TODO(calibrate)）。
+- **无游标时补跑窗口偏窄**：`selectReviewWindow` 无游标时以 `localDayStart(now)` 为下界（今天 00:00），历史事件全在今天之前时窗口为空 → 不补跑。是否改为"无游标取全部历史"待拍板。
 - **单实例**：dataDir 不按用户/agent 键控。
 - **场景集自建**：漂移审计场景集与伪有害集为初始自建（TODO 对接 XSTest/OR-Bench 公开基准）。
 - **导入通道**：仅支持 `.v4.jsonl.zstd` 结构（user `data.content[0].text` / assistant `data.message.content`）；assistant 提取"从后往前取第一条 type=text"（跳过 reasoning/tool_call）。
@@ -197,6 +201,55 @@ dsh --profile web --dump-config
 - 遗忘三件套：衰减 → 压缩 → 物理删除（同时解决隐私删除与导出的地基）
 - 按 agent/session 键控 dataDir；画像评估升级为"规则 + 模型自评"混合
 - 对接公开基准集；真实模型下重跑 /persona audit 校准阈值
+
+## 0.5.1 Changelog
+
+修一个"机制全在、但一次都没跑过"的缺陷。**214/214 测试通过**。
+
+### 问题：监听了一个不存在的事件
+
+`src/index.ts` 里两段 `ctx.once('app/ready', …)` 承担了全部启动工作：注入预热、LLM 预热、先天画像采样、**启动补跑复盘**。但 DSH 没有这个事件——`@deepseek-ai/dsh-app-boot` 只 `emit('app-boot/config-reload')`，cordis 本身也没有 ready 事件。
+
+用 CDP 连上运行中的 DSH 宿主（inspector 端口）确认：进程跑了 13 分钟，`ctx.events._hooks.get('app/ready')` 上仍挂着 2 个**未被消费**的 once 钩子，owner 都是 `persona-innate`；`EventLog.cache` 始终为 `null`——记忆从未被加载，也就没有迁移。
+
+后果按严重度排序：
+
+- **启动补跑永不执行**：`readyAt` 是补跑窗口的上界，取不到就整段跳过。DSH web 常关，02:00 的定时器不在进程里，那天就永久丢了。
+- LLM 未预热：进程内第一次复盘拿到 mock，被门禁拦掉，等于白跑一次。
+- 注入预热不执行：首轮注入为空（之后每轮 addEvent 会补刷，影响小）。
+- 画像采样不在启动时触发（老用户 profile.json 已存在，影响小）。
+
+**复盘定时器不受影响**——它写在 `ctx.effect()` 里，而 effect 是立即执行的。同一份文件里，用 effect 的那部分活着、用 `once('app/ready')` 的两块死了，这本身就是答案。
+
+### 为什么测试没抓到
+
+四个测试文件都在手动 `root.emit('app/ready')`。测试模拟了集成点，集成点本身是假的——**用例把不存在的契约当成了存在**。这类缺陷单测覆盖率再高也抓不到，只能靠运行期对账。
+
+### 修法
+
+启动拆两阶段：
+
+1. **阶段一（零依赖）**：注入预热 + `markBooted()`，挂载即跑。这一段的"零依赖"保证了启动代码不会再整块静默。
+2. **阶段二（依赖 llm）**：预热 LLM 解析 → 画像采样 → 启动补跑。`llmMode === 'mock'` 直接跑；否则 `ctx.inject(['llm'], …)` 等服务出现（已在则立即回调）——**绝不假设存在某个 ready 事件**。
+
+两个实现约束：
+
+- `inject` / `effect` 只能在 `apply` 期间建立，放到 `await` 之后会抛 `cannot create effect on inactive context`（第一版就是这么挂的，被测试逼出来）。
+- `bootAt` 必须**同步**捕获、先于任何 await：晚取会把"启动后几毫秒内写入的事件"当成历史补进去。
+
+新增 `personaMemory.booted: Promise<void>`，命令与测试都改用它做确定性等待，不再靠 `setTimeout` 猜时序。
+
+### 实测验证（不是测试，是运行期）
+
+重启后，**没有任何人发消息**的情况下：
+
+- `~/.dsh/persona-innate/events/2026-11.jsonl` 自动出现（5346 B），`events.json` 变为 179 B 指针，`.migrated` / `.bak` 各留一份完整副本
+- 进程内查：插件 state=2、`app/ready` 钩子残留 0（事件已完全消失）、`booted` resolved、`EventLog.cache` 10 条、`migrationChecked` true、`loadedMonths` `['2026-11']`
+- 顺带解决 0.5.0 遗留的"迁移发生在第一条消息热路径上"的问题：现在迁移在启动时完成
+
+### 已知遗留（本次未改）
+
+`selectReviewWindow` 在**无游标**时用 `localDayStart(now)` 作窗口下界，即"从今天 00:00 起"。首次安装或升级后若历史事件全在今天之前，窗口为空 → 按"空窗口不推进"的设计不会补跑。是否该在无游标时改为"取全部历史"需要单独拍板。
 
 ## 0.5.0 Changelog
 

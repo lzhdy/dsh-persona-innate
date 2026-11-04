@@ -25,7 +25,7 @@ export declare class JsonStore implements KVStore {
     private readonly fs;
     private readonly root;
     /**
-     * 同路径写串行化：app/ready 存在多个监听器并发触发同一文件（self-model.json）的
+     * 同路径写串行化：启动阶段存在多个并发写入同一文件（self-model.json）的
      * 首次创建，Windows 下第二个 open 会拿到 EPERM。按路径排队，成本可忽略。
      */
     private readonly writeLocks;

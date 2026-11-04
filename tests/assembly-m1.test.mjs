@@ -91,7 +91,8 @@ async function assemble(config) {
     llmMode: 'mock',
     ...config,
   });
-  root.emit('app/ready');
+  // 启动工作在挂载时触发（DSH 无 app-ready 事件），用 booted 等待而不是模拟事件
+  await root.personaMemory.booted;
   return { root, fiber, dataDir, contexts, commands };
 }
 
@@ -99,7 +100,7 @@ test('M1 装配：两个新注入 provider 注册、文本非空不超长、为�
   const { fiber, contexts } = await assemble();
   assert.equal(fiber.state, 2, '插件应处于 active 状态');
 
-  // 等 app/ready 的注入预热完成
+  // 等启动注入预热完成（booted 已兑现，这里仍轮询文本非空以覆盖异步渲染）
   await waitFor(() => {
     const st = contexts.find((c) => c.name === 'persona-state');
     const sm = contexts.find((c) => c.name === 'persona-self-model');

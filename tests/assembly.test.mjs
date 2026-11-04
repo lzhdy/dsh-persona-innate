@@ -88,14 +88,12 @@ test('装配：插件在 Cordis 运行时中正确激活', async () => {
   // 命令注册
   assert.ok(registeredCommands.some((c) => c.name === 'persona'), '应注册 /persona 命令');
 
-  // 事件生命周期：app/ready 触发（无 llm → 画像采样降级，不抛错）
-  let readyFired = false;
-  root.once('app/ready', () => {
-    readyFired = true;
-  });
-  root.emit('app/ready');
-  await new Promise((r) => setTimeout(r, 50));
-  assert.equal(readyFired, true, 'app/ready 应可触发');
+  // 启动工作：DSH 没有 app-ready 事件（dsh-app-boot 只 emit app-boot/config-reload），
+  // 启动改为挂载时触发。这里用 booted 做确定性等待——不要再 root.emit('app/ready')
+  // 去模拟一个根本不存在的集成点，那正是这个 bug 藏了两轮的原因。
+  await root.personaMemory.booted;
+  const bootStatus = await root.personaMemory.status();
+  assert.equal(typeof bootStatus.events, 'number', '启动完成后 status 应可用（记忆已可读）');
 
   // 写入 + 注入文本生效
   const mem = root.personaMemory.memory;

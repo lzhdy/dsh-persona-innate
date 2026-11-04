@@ -186,9 +186,8 @@ test('v0.7-A1（装配级核心）：48 小时空闲后第一轮对话，落盘�
 
   const { root, fiber } = await assemblePlugin({ dataDir });
   try {
-    root.emit('app/ready');
-    // 等状态机从 48h 前的 state.json 载入（注入预热会触发 ensureLoaded）
-    await waitFor(async () => (await readIfExists(join(dataDir, 'state.json'))) !== null);
+    // 启动工作在挂载时触发（DSH 无 app-ready 事件）；等它完成，保证状态机已载入
+    await root.personaMemory.booted;
 
     // 一条中性工作消息：importance 0.8、无情感标签 → apply 的抬升量很小（约 +0.06）
     root.emit(
