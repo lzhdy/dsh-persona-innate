@@ -43,8 +43,8 @@ export type CursorLoadResult =
 
 /**
  * 游标存储。
- * 读失败必须显式返回错误而不是 null：把"读不到"当成"没有游标"会让窗口退回当日零点，
- * 于是同一天被反复复盘（重复版本），或者游标被覆盖成空值。
+ * 读失败必须显式返回错误而不是 null：把"读不到"当成"没有游标"会让窗口退回最早一条事件，
+ * 于是整段历史被反复复盘（重复版本），或者游标被覆盖成空值。
  */
 export class ReviewCursorStore {
   constructor(
@@ -98,9 +98,6 @@ export function localDateString(now: Date): string {
 
 /**
  * 复盘窗口：游标时刻（开区间）→ 现在。
- * 无游标（首次启用本机制）时退化为"本地当日 00:00 起"：
- * 没有游标就没有可靠的区间起点，用当日零点是最保守的近似（宁可漏掉升级前的历史，
- * 也不要把一年前的旧事件当成"今天发生的事"再复盘一遍）。
  * 时间戳不可解析的事件直接排除（无法确定它属于哪段窗口）。
  *
  * `until` 是可选的上界（开区间）。只有启动补跑会传它：补跑要补的是"进程不在期间"的缺口，
@@ -108,19 +105,82 @@ export function localDateString(now: Date): string {
  * 手动 /persona review 抢同一个窗口）。传上界时窗口变成 (from, until)，闭区间会让
  * "启动那一毫秒写入的事件"挤进补跑，因此这里取严格小于。
  */
+/** 单次复盘窗口的事件上限。
+ * 无游标（首次运行 / 升级后）时窗口可能覆盖全部历史，不设上限会让第一次复盘
+ * 变成一次天价 LLM 调用。超出部分从**最早端**截断（保留最近的），并如实记录
+ * "有 N 条更早的事件未纳入"——不静默丢弃。 */
+export const REVIEW_WINDOW_MAX = 200;
+
+export interface ReviewWindowSelection {
+  events: PersonaEvent[];
+  /** 窗口下界（ISO）。无游标时等于"最早一条事件"的时刻。 */
+  lowerBound: string;
+  /** 因超出上限被排除在窗口外的更早事件条数 */
+  truncatedEarlier: number;
+}
+
+/**
+ * 选窗口。下界规则：
+ * - 有游标：`(游标, now|until)` 开区间——游标时刻的事件不重复复盘。
+ * - **无游标：从最早一条事件起**（含该条）。
+ *
+ * 无游标为什么不能退化成"本地当日 00:00"：定时复盘在 02:00 执行，窗口就变成
+ * `[今天 00:00, 02:00)`——那两小时通常在睡觉，于是窗口为空 → 按"空窗口不推进"
+ * 跳过 → 游标仍为 null → 第二天完全重复。**首次复盘会死锁**。同时升级前写入的
+ * 事件永远落在下界之前，只成记忆、不成成长。
+ */
+export function selectReviewWindowDetailed(
+  events: readonly PersonaEvent[],
+  cursorAt: string | null,
+  now: Date,
+  until: Date | null = null,
+): ReviewWindowSelection {
+  const upper = until ? until.getTime() : Number.POSITIVE_INFINITY;
+  const parsedCursor = cursorAt ? Date.parse(cursorAt) : Number.NaN;
+  const hasCursor = Number.isFinite(parsedCursor);
+
+  let from: number;
+  if (hasCursor) {
+    from = parsedCursor;
+  } else {
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const e of events) {
+      const t = Date.parse(e.time);
+      if (Number.isFinite(t) && t < upper && t < earliest) earliest = t;
+    }
+    // 没有任何可解析且早于上界的事件 → 窗口必然为空（调用方会 skipped），
+    // 这里只是防止 `new Date(Infinity).toISOString()` 抛 RangeError 的兜底。
+    from = Number.isFinite(earliest) ? earliest : localDayStart(now);
+  }
+
+  const window = events.filter((e) => {
+    const t = Date.parse(e.time);
+    if (!Number.isFinite(t) || t >= upper) return false;
+    // 有游标用开区间（游标时刻不重复）；无游标时下界就是最早那条事件本身，
+    // 必须用闭区间，否则它会被自己的下界排除掉。
+    return hasCursor ? t > from : t >= from;
+  });
+
+  const truncatedEarlier = Math.max(0, window.length - REVIEW_WINDOW_MAX);
+  return {
+    events: truncatedEarlier > 0 ? window.slice(window.length - REVIEW_WINDOW_MAX) : window,
+    lowerBound: new Date(from).toISOString(),
+    truncatedEarlier,
+  };
+}
+
+/**
+ * 只要事件、不要截断信息的薄封装。
+ * 仅用于"只关心内容"的调用点；复盘路径必须用 selectReviewWindowDetailed，
+ * 否则截断会被静默吞掉。
+ */
 export function selectReviewWindow(
   events: readonly PersonaEvent[],
   cursorAt: string | null,
   now: Date,
   until: Date | null = null,
 ): PersonaEvent[] {
-  const parsedCursor = cursorAt ? Date.parse(cursorAt) : Number.NaN;
-  const from = Number.isFinite(parsedCursor) ? parsedCursor : localDayStart(now);
-  const upper = until ? until.getTime() : Number.POSITIVE_INFINITY;
-  return events.filter((e) => {
-    const t = Date.parse(e.time);
-    return Number.isFinite(t) && t > from && t < upper;
-  });
+  return selectReviewWindowDetailed(events, cursorAt, now, until).events;
 }
 
 /** 启动时是否该补跑：无游标（首次/升级后）或距上次复盘 ≥ 24h */
@@ -137,7 +197,15 @@ export function shouldCatchUpReview(
 
 export type ReviewWindowOutcome =
   /** 成功复盘并推进游标 */
-  | { kind: 'done'; out: ReviewOutput; window: PersonaEvent[]; startedAt: string; cursorWarning?: string }
+  | {
+      kind: 'done';
+      out: ReviewOutput;
+      window: PersonaEvent[];
+      startedAt: string;
+      cursorWarning?: string;
+      /** 因超出单次上限而未纳入窗口的更早事件条数（>0 时调用方应留痕） */
+      truncatedEarlier?: number;
+    }
   /** 没有可复盘的事件（窗口为空 / 游标不可读）——不推进游标 */
   | { kind: 'skipped'; reason: string; startedAt: string }
   /** 复盘执行了但没有产出（门禁拦截或异常）——不推进游标 */
@@ -182,7 +250,8 @@ export async function runReviewWithCursor(opts: {
   }
 
   const from = loaded.cursor?.lastReviewAt ?? null;
-  const window = selectReviewWindow(opts.allEvents, from, startedAt, until);
+  const selection = selectReviewWindowDetailed(opts.allEvents, from, startedAt, until);
+  const window = selection.events;
   if (window.length === 0) {
     return {
       kind: 'skipped',
@@ -219,5 +288,12 @@ export async function runReviewWithCursor(opts: {
     cursorWarning = `游标写入失败：${err instanceof Error ? err.message : String(err)}`;
   }
 
-  return { kind: 'done', out, window, startedAt: startedIso, ...(cursorWarning ? { cursorWarning } : {}) };
+  return {
+    kind: 'done',
+    out,
+    window,
+    startedAt: startedIso,
+    ...(cursorWarning ? { cursorWarning } : {}),
+    ...(selection.truncatedEarlier > 0 ? { truncatedEarlier: selection.truncatedEarlier } : {}),
+  };
 }

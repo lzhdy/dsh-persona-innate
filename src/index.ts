@@ -25,7 +25,7 @@ import { MockLlm, defaultMockScript } from './llm-client.js';
 import { SelfModelService } from './self-model.js';
 import { PersonaStateMachine } from './state.js';
 import { DailyReviewEngine, correctionOutcome } from './review.js';
-import { ReviewCursorStore, runReviewWithCursor, shouldCatchUpReview } from './review-cursor.js';
+import { REVIEW_WINDOW_MAX, ReviewCursorStore, runReviewWithCursor, shouldCatchUpReview } from './review-cursor.js';
 import { createSerialQueue, decayForIdleGap } from './state-decay.js';
 import { runDriftAudit, runLongRangeConsistency, runHonestyBaseline, buildAuditScenarios } from './eval.js';
 import { runImportChat, ImportError, type ImportErrorCode } from './import-chat.js';
@@ -568,6 +568,12 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
   let reviewInFlight = false;
   /** 上次复盘"没做事"的正当理由（窗口为空/游标不可读）；与门禁拦截区分展示 */
   let lastReviewSkipReason: string | null = null;
+  /**
+   * 上次复盘因超出单次上限而未纳入的更早事件条数。
+   * 首次复盘（无游标）会从最早事件起算，历史长时可能撞上 REVIEW_WINDOW_MAX；
+   * 截断是必要之恶，但必须让用户看得见——所以在 /persona review 里也回显。
+   */
+  let lastReviewTruncated: number | null = null;
 
   /** TODO(calibrate)：feedback.inferredAttitude 由 emotionTags 启发式推断 */
   const inferAttitude = (event: PersonaEvent): UserFeedback['inferredAttitude'] => {
@@ -592,6 +598,7 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     }
     reviewInFlight = true;
     lastReviewSkipReason = null;
+    lastReviewTruncated = null;
     try {
       lastReviewBlocked = null;
       // 门禁：auto 模式下 llm 服务未就绪时会降级为脚本化 MockLlm。
@@ -695,6 +702,15 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
       if (out.memoryFacts.persisted) void refreshInjection();
       if (outcome.cursorWarning) {
         ctx.logger.warn('[persona-innate] %s（下次可能重复覆盖同一段窗口）', outcome.cursorWarning);
+      }
+      if (outcome.truncatedEarlier) {
+        lastReviewTruncated = outcome.truncatedEarlier;
+        // 不静默丢弃：首次复盘从最早事件起算，撞上限时保留最近的，更早的如实报数
+        ctx.logger.warn(
+          '[persona-innate] 本次复盘窗口超出单次上限 %d 条，有 %d 条更早的事件未纳入（它们仍是记忆，只是本轮不参与成长归纳）',
+          REVIEW_WINDOW_MAX,
+          outcome.truncatedEarlier,
+        );
       }
       ctx.logger.info(
         '[persona-innate] 每日复盘完成：mode=%s，窗口 %d 条事件（开始 %s，日期标签 %s），LLM 调用 %d 次（派生 %d 次），self_model v%s，阶段 %s；threads 新建 %d/更新 %d，attributes 新建 %d/取代 %d，丢弃 %d，过期 %d',
@@ -1246,6 +1262,11 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
             out.archiveEntry ? `成长档案已追加（${out.archiveEntry.stage}）` : '成长档案未追加',
             `自源重要性条目 ${out.selfImportance.length} 条`,
             factLine,
+            ...(lastReviewTruncated
+              ? [
+                  `注意：窗口超出单次上限 ${REVIEW_WINDOW_MAX} 条，有 ${lastReviewTruncated} 条更早的事件未纳入本轮成长归纳（仍是记忆，未删除）`,
+                ]
+              : []),
           ].join('\n'),
         };
       }

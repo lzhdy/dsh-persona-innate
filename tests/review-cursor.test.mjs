@@ -18,11 +18,13 @@ import { join } from 'node:path';
 import { JsonStore } from '../lib/store.js';
 import {
   CATCH_UP_MIN_GAP_MS,
+  REVIEW_WINDOW_MAX,
   ReviewCursorStore,
   localDateString,
   localDayStart,
   runReviewWithCursor,
   selectReviewWindow,
+  selectReviewWindowDetailed,
   shouldCatchUpReview,
 } from '../lib/review-cursor.js';
 
@@ -147,15 +149,115 @@ test('v0.7-B1: 有游标时窗口只取游标之后的（含边界：等于游�
   );
 });
 
-test('v0.7-B1b: 无游标（首次）退化为本地当日 00:00 起，昨天的事件不重放', () => {
+test('v0.7-B1b: 无游标（首次）窗口从最早一条事件起，昨天的事件必须纳入', () => {
+  // 旧契约是"退化为本地当日 00:00 起"，那正是首次复盘死锁的来源：
+  // 定时复盘在 02:00 跑，窗口就成了 [今天 00:00, 02:00)——通常为空 → 不推进游标 →
+  // 第二天完全重复。新契约：没有游标时从最早一条事件起，一次把历史补上。
   const now = new Date(2026, 10, 4, 9, 30, 0); // 本地 2026-11-04 09:30
   const yesterdayLate = ev('e_ystd', new Date(2026, 10, 3, 23, 0, 0).toISOString());
   const todayEarly = ev('e_today', new Date(2026, 10, 4, 1, 0, 0).toISOString());
 
   const window = selectReviewWindow([yesterdayLate, todayEarly], null, now);
-  assert.deepEqual(window.map((e) => e.id), ['e_today']);
+  assert.deepEqual(window.map((e) => e.id), ['e_ystd', 'e_today'], '升级前的历史事件必须被首次复盘看到');
+
+  const detailed = selectReviewWindowDetailed([yesterdayLate, todayEarly], null, now);
+  assert.equal(
+    detailed.lowerBound,
+    yesterdayLate.time,
+    '无游标时下界 = 最早一条事件的时刻（闭区间，不能把它自己排除掉）',
+  );
+  assert.equal(detailed.truncatedEarlier, 0);
+
   assert.equal(localDayStart(now), new Date(2026, 10, 4, 0, 0, 0).getTime(), '零点必须按本地时区算');
   assert.equal(localDateString(now), '2026-11-04', '标签用本地日期，不用 UTC 切片');
+});
+
+test('v0.7-B1c: 首次复盘死锁回归 —— 凌晨 02:00 且无游标时窗口不为空', async () => {
+  // 直接复现死锁：事件全部在"昨天"，复盘发生在今天 02:00。
+  // 旧语义下窗口 = [今天 00:00, 02:00) = 空 → skipped → 游标不推进 → 永远重复。
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+  const now = new Date(2026, 10, 4, 2, 0, 0);
+  const yesterday = [
+    ev('e_y1', new Date(2026, 10, 3, 10, 0, 0).toISOString()),
+    ev('e_y2', new Date(2026, 10, 3, 23, 30, 0).toISOString()),
+  ];
+
+  let seen = [];
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: yesterday,
+    now,
+    review: async ({ events }) => {
+      seen = events.map((e) => e.id);
+      return fakeOut('2026-11-04');
+    },
+  });
+
+  assert.equal(outcome.kind, 'done', '无游标 + 今天还没有事件时，不该 skipped（那会永远没有游标）');
+  assert.deepEqual(seen, ['e_y1', 'e_y2']);
+
+  const saved = await cursorStore.load();
+  assert.ok(saved.ok && saved.cursor, '游标必须被推进，否则明天还会重来一次');
+  assert.equal(saved.cursor.lastReviewAt, now.toISOString());
+});
+
+/* ── 1c. 无游标时的上限与截断 ─────────────────────────────────── */
+
+test('v0.7-B1d: 无游标时窗口超过上限 → 保留最近的，并如实回报被截掉的更早条数', async () => {
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+  const now = new Date(2026, 10, 4, 12, 0, 0);
+
+  // 上限 + 37 条，时刻递增
+  const total = REVIEW_WINDOW_MAX + 37;
+  const events = Array.from({ length: total }, (_, i) =>
+    ev(`e_${String(i).padStart(3, '0')}`, new Date(now.getTime() - (total - i) * 60_000).toISOString()),
+  );
+
+  let seen = [];
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: events,
+    now,
+    review: async ({ events: win }) => {
+      seen = win;
+      return fakeOut('2026-11-04');
+    },
+  });
+
+  assert.equal(outcome.kind, 'done');
+  assert.equal(seen.length, REVIEW_WINDOW_MAX, `窗口应被截到 ${REVIEW_WINDOW_MAX} 条`);
+  assert.equal(outcome.truncatedEarlier, 37, '被排除的更早事件条数必须回传，不能静默丢弃');
+  assert.equal(seen[seen.length - 1].id, `e_${String(total - 1).padStart(3, '0')}`, '保留的是最近的');
+  assert.equal(seen[0].id, 'e_037', '从最早端截断：前 37 条被排除');
+
+  // 截断不影响游标推进：本次窗口右端仍是 now，下一轮从 now 继续，被截掉的不重复
+  const saved = await cursorStore.load();
+  assert.ok(saved.ok && saved.cursor);
+  assert.equal(saved.cursor.lastReviewAt, now.toISOString());
+});
+
+test('v0.7-B1e: 未超上限时不回报 truncatedEarlier（避免日志噪音）', async () => {
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+  const now = new Date(2026, 10, 4, 12, 0, 0);
+  const events = Array.from({ length: REVIEW_WINDOW_MAX }, (_, i) =>
+    ev(`e_${i}`, new Date(now.getTime() - (REVIEW_WINDOW_MAX - i) * 60_000).toISOString()),
+  );
+
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: events,
+    now,
+    review: async () => fakeOut('2026-11-04'),
+  });
+
+  assert.equal(outcome.kind, 'done');
+  assert.equal(outcome.truncatedEarlier, undefined, '正好等于上限时没有截断');
 });
 
 /* ── 2. 窗口为空：不推进游标 ─────────────────────────────────── */
