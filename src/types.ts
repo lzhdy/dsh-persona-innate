@@ -317,6 +317,12 @@ export interface SelfImportanceEntry {
 export interface ReviewInput {
   date: string;
   events: PersonaEvent[];
+  /**
+   * v0.6：全量事件（跨天累积）。
+   * threads / attributes 的 sourceEventIds 必须指向真实存在的事件，而存在性只能在全量里判；
+   * 只拿当日窗口判会把"上周的面试"误判成编造。缺省时由复盘引擎从 store 读全量。
+   */
+  allEvents?: readonly PersonaEvent[];
   selfModel: SelfModelSnapshot | null;
   state: EmotionalState | null;
   feedback: UserFeedback[];
@@ -351,7 +357,18 @@ export interface ReviewOutput {
   stageTrajectory: string;
   archiveEntry: GrowthEntry | null;
   selfImportance: SelfImportanceEntry[];
-  cost: { llmCalls: number };
+  /** v0.6：threads / attributes 派生统计（供 /persona review 展示；降级/skip 时为未执行） */
+  memoryFacts: MemoryFactStats;
+  cost: {
+    /** 核心三步（distillFacts / reflectSelf / updateMirror）的 LLM 调用数——口径不变 */
+    llmCalls: number;
+    /**
+     * v0.6：记忆事实派生这一步的 LLM 调用数，单独计。
+     * 不并入 llmCalls 的理由：llmCalls 的口径是"复盘三步流水线"，
+     * 既有观测与断言都按这个口径读；混进去会把"核心复盘变贵了"和"多了一步派生"混为一谈。
+     */
+    memoryFactCalls: number;
+  };
 }
 
 /* ── 评测（§14 诚实基线 / §15 漂移审计 / 长程一致性） ── */
@@ -427,4 +444,107 @@ export interface StateMachineLike {
   getRelationshipStage(): RelationshipStage;
   reinforce(record: Omit<ReinforcementRecord, 'id' | 'time'>): Promise<ReinforcementRecord>;
   snapshot(): Promise<PersonaStateFile>;
+}
+
+/* ══════════════════════ v0.6 记忆层：threads / attributes ══════════════════════ */
+/*
+ * 为什么在 events 之上派生两层：
+ * - events 是"一条消息一条记录"。同一件事说五次 = 五条互不相识的记录，各自竞争注入名额，
+ *   而去重键是"topic + 全文精确匹配"——重复提及恰恰是最强的重要性信号，却被当成噪音。
+ * - events 无法表达"一件还没结束的事"（status open），也就问不出"你上周说的面试后来怎么样了"。
+ * - events 无法表达"被取代"（我换工作了），旧单位永远有效，三个月后人格会自信地记错。
+ *
+ * 两层的寿命完全不同，所以分开存、分开合并：
+ * - thread：会结束，有 open/resolved/expired，每次提及 mentionCount++ / lastMentionedAt 更新；
+ * - attribute：不过期，只提置信度，或被新值取代（superseded）。
+ */
+
+export type ThreadStatus = 'open' | 'resolved' | 'expired';
+
+/** 未结束/已结束的一件事（情景层的"索引卡"，仍指向具体事件证据） */
+export interface PersonaThread {
+  /** 'th_' + 稳定短哈希（由 key 推导，同 key 跨天合并不新建） */
+  id: string;
+  /** 归一化主题，用于跨天合并，如 '面试'、'母亲住院' */
+  key: string;
+  /** 描述性标题，如 '周四的面试' */
+  title: string;
+  status: ThreadStatus;
+  /** ISO */
+  openedAt: string;
+  /** ISO：最近一次被提及 */
+  lastMentionedAt: string;
+  mentionCount: number;
+  /** 必须非空且真实存在于 events（校验不通过整条丢弃，不补空数组） */
+  sourceEventIds: string[];
+  /** 可选：从时间词推出的提示，如 '周四' */
+  dueHint?: string;
+  resolvedAt?: string;
+  expiredAt?: string;
+}
+
+/** 不过期的长期事实（用户属性/世界事实），只提置信度或被取代 */
+export interface PersonaAttribute {
+  /**
+   * 'at_' + 稳定短哈希。
+   * 与 thread 不同，这里必须由 key + value 共同推导：同 key 不同 value 要新建一条，
+   * 若只按 key 哈希，新旧两条会撞同一个 id，supersededBy 就指不到新条目、取代链断掉。
+   */
+  id: string;
+  /** '工作单位'、'居住城市'、'宠物' */
+  key: string;
+  /** '杭州某电商公司做后端' */
+  value: string;
+  status: 'active' | 'superseded';
+  /** 0..1 */
+  confidence: number;
+  sourceEventIds: string[];
+  firstSeenAt: string;
+  updatedAt: string;
+  /** 指向取代它的新 attribute id */
+  supersededBy?: string;
+  supersededAt?: string;
+}
+
+/** threads 存储文件（单文件，数百条以内，不分片） */
+export interface ThreadsFile {
+  version: 1;
+  threads: PersonaThread[];
+}
+
+/** attributes 存储文件 */
+export interface AttributesFile {
+  version: 1;
+  attributes: PersonaAttribute[];
+}
+
+/** 派生条目被丢弃的原因分类（复盘统计要能解释"为什么少了"） */
+export type FactDropReason =
+  /** sourceEventIds 为空 */
+  | 'no-source'
+  /** sourceEventIds 指向不存在的事件（编造/已归档） */
+  | 'unknown-source'
+  /** 含祈使句/行为规则（stripCheck 拦下） */
+  | 'strip'
+  /** 字段缺失或非法（无 key / 无 title / status 非法） */
+  | 'invalid';
+
+/** threads / attributes 派生统计（ReviewOutput.memoryFacts） */
+export interface MemoryFactStats {
+  /** 是否发起了派生（含 LLM 调用与读盘） */
+  ran: boolean;
+  /** 本次是否真的写了盘 */
+  persisted: boolean;
+  threadsCreated: number;
+  threadsUpdated: number;
+  attributesCreated: number;
+  attributesUpdated: number;
+  attributesSuperseded: number;
+  /** 被丢弃的条目总数（= dropReasons 之和） */
+  dropped: number;
+  dropReasons: Record<FactDropReason, number>;
+  /** 本次收敛为 expired 的 thread 数 */
+  expired: number;
+  /** 未能完成的原因（读盘失败 / 解析失败 / 写盘失败），供 /persona review 展示 */
+  error?: string;
 }

@@ -11,12 +11,24 @@ import { provenanceLabel, isProvenance } from './provenance.js';
 import { createStripStats, recordStrip, stripCheck, type StripStats } from './directive-strip.js';
 import { dedupKey } from './extract.js';
 import { EventLog } from './event-log.js';
+import { MemoryFactStore } from './memory-facts.js';
 import { assembleRecall, relativeDayLabel, type RecallItem, type RecallSlot } from './recall.js';
 import type { KVStore } from './store.js';
+
+/**
+ * 未结线索的来源（v0.6）。
+ * 抽成接口而不是在 buildInjection 里直接读文件：
+ * 一是测试可以给内存实现，不必落盘；二是生产侧由集成线注入（保持 PersonaMemory 只管装配）。
+ */
+export interface OpenThreadsSource {
+  loadOpenThreads(): Promise<ReadonlyMap<string, readonly string[]>>;
+}
 
 export interface MemoryOptions {
   stripDirectives: boolean;
   injectLimit: number;
+  /** 未结线索来源；缺省用同一 store 上的 memory/threads.json */
+  openThreadsSource?: OpenThreadsSource;
 }
 
 export interface AddResult {
@@ -59,6 +71,8 @@ export interface InjectionResult {
 export class PersonaMemory {
   readonly stripStats: StripStats = createStripStats();
   private readonly log: EventLog;
+  /** v0.6：未结线索来源（store 可注入 → 测试无需真落盘） */
+  private readonly facts: OpenThreadsSource;
   /** 软状态：本次会话内的检索时间（不落盘，flush 时随分片重写顺带持久化） */
   private softDirty = false;
 
@@ -67,6 +81,7 @@ export class PersonaMemory {
     private readonly opts: MemoryOptions,
   ) {
     this.log = new EventLog(store);
+    this.facts = opts.openThreadsSource ?? new MemoryFactStore(store);
   }
 
   async loadEvents(): Promise<PersonaEvent[]> {
@@ -220,10 +235,21 @@ export class PersonaMemory {
 
     const k = Math.max(1, limit ?? this.opts.injectLimit);
     const now = opts.now ?? Date.now();
+    // 未结槽：调用方没给就自己从派生层取（threads 由复盘产出）。
+    // 读失败降级为空 map：注入是每轮热路径，读不到派生层只该意味着"这轮少一个槽位"，
+    // 不该让整轮对话报错——这与写路径（复盘读失败必须停手）方向相反，是刻意的。
+    let openThreads = opts.openThreads;
+    if (!openThreads) {
+      try {
+        openThreads = await this.facts.loadOpenThreads();
+      } catch {
+        openThreads = undefined;
+      }
+    }
     const { items } = assembleRecall(events, k, {
       now,
       cueText: opts.cueText,
-      openThreads: opts.openThreads,
+      openThreads,
     });
 
     // M3 叙事一致性：冲突的 self_direct 不注入（注入优先级最高，冲突风险也最高）

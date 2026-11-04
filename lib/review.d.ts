@@ -2,10 +2,12 @@
  * 每日复盘引擎（M1 · 线 D）
  * 机制依据：设计文档 v0.8 §10（8 步复盘流程 / O17 降级 / O6·O35 自源重要性）+ §8（选择性强化）
  * 冻结导出面见 docs/m1-interface-design.md §2——修改必须逐字对齐。
- * 注意：本模块只依赖 ./types.js / ./store.js（类型），不 import ./self-model.js 与 ./state.js，
- *       运行时由集成线 H 注入实例（SelfModelServiceLike / StateMachineLike）。
+ * 注意：本模块只依赖 ./types.js / ./store.js（类型）+ ./event-log.js + ./memory-facts.js，
+ *       不 import ./self-model.js 与 ./state.js，运行时由集成线 H 注入实例
+ *       （SelfModelServiceLike / StateMachineLike）。event-log / memory-facts 都只依赖
+ *       types + store，不构成环。
  */
-import type { LlmClient, PersonaEvent, PersonaFact, PersonaStage, ReviewInput, ReviewOutput, SelfImportanceEntry, SelfModelDiff, SelfModelServiceLike, SelfModelSnapshot, StateMachineLike, UserFeedback } from './types.js';
+import type { LlmClient, MemoryFactStats, PersonaEvent, PersonaFact, PersonaStage, ReviewInput, ReviewOutput, SelfImportanceEntry, SelfModelDiff, SelfModelServiceLike, SelfModelSnapshot, StateMachineLike, UserFeedback } from './types.js';
 import type { KVStore } from './store.js';
 /** 复盘依赖（运行时注入；state 在 M1 复盘流水线内不写回，仅保留注入位） */
 export interface ReviewDeps {
@@ -23,10 +25,24 @@ export declare const REVIEW_PROMPTS: {
     reflectSelf: string;
     updateMirror: string;
 };
+/**
+ * v0.6 记忆事实派生 prompt（threads / attributes）。
+ *
+ * 为什么单独一步而不是塞进 distillFacts：两件事的寿命不同、合并方式不同，
+ * 混在一个 prompt 里会让模型把"会结束的事"写成"长期事实"（"在考虑跳槽"变成"没工作"），
+ * 而这类错误一旦落盘就长期存在。分开问，结构上就不会串。
+ */
+export declare const MEMORY_FACT_PROMPT: string;
 /** 每日复盘引擎：8 步流水线（§10），LLM 输出解析失败时该步降级为空继续，保证 mock 无 key 可跑 */
 export declare class DailyReviewEngine {
     private readonly deps;
     private readonly opts;
+    /**
+     * threads / attributes 存储。
+     * 复用注入进来的 store 构造，而不是在方法里读文件：
+     * 测试把 store 换成临时目录（或故意读失败的实现）即可，不需要额外的注入点。
+     */
+    private readonly facts;
     constructor(deps: ReviewDeps, opts?: ReviewOptions);
     /** O17：无输入 skip；仅身体事件（initiation=external_triggered）degraded；其余 full */
     shouldRun(input: ReviewInput): 'full' | 'degraded' | 'skip';
@@ -38,6 +54,22 @@ export declare class DailyReviewEngine {
     reflectSelf(events: PersonaEvent[], facts: PersonaFact[]): Promise<Partial<SelfModelDiff>>;
     /** step4 更新关系认知·镜中我（LLM reflect #3）。解析失败 → '' 降级继续 */
     updateMirror(events: PersonaEvent[], feedback: UserFeedback[]): Promise<string>;
+    /**
+     * step4.5（v0.6）：从当日事件派生 threads / attributes（LLM #4，单独计入 cost.memoryFactCalls）。
+     *
+     * 为什么只在复盘里做：addEvent 是对话热路径，必须保持廉价、规则化、零 LLM 调用；
+     * 派生是"慢改"，合并、取代、过期收敛都需要跨天视角，只有复盘同时具备事件窗口与写权限。
+     *
+     * 失败姿态（与 events 层"读失败→空库→覆盖"的坑对齐）：
+     * - 读不到既有 threads/attributes → 直接返回，不写盘（否则会用空集合覆盖全库）；
+     * - LLM 输出不是 JSON → 直接返回，不写盘（解析失败不等于"今天没有新事实"，
+     *   若按空输出落盘，过期收敛会顺带改状态，等于用一次失败的调用来改库）；
+     * - 写盘抛错 → 捕获并记进 stats.error，不打断复盘主流程。
+     */
+    extractThreadsAndAttributes(events: readonly PersonaEvent[], opts?: {
+        now?: string;
+        allEvents?: readonly PersonaEvent[];
+    }): Promise<MemoryFactStats>;
     /** step5 一致性检查（§9：新认知须有事件证据） */
     consistencyCheck(diff: SelfModelDiff, facts: PersonaFact[]): {
         ok: boolean;

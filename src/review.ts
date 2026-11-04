@@ -2,12 +2,15 @@
  * 每日复盘引擎（M1 · 线 D）
  * 机制依据：设计文档 v0.8 §10（8 步复盘流程 / O17 降级 / O6·O35 自源重要性）+ §8（选择性强化）
  * 冻结导出面见 docs/m1-interface-design.md §2——修改必须逐字对齐。
- * 注意：本模块只依赖 ./types.js / ./store.js（类型），不 import ./self-model.js 与 ./state.js，
- *       运行时由集成线 H 注入实例（SelfModelServiceLike / StateMachineLike）。
+ * 注意：本模块只依赖 ./types.js / ./store.js（类型）+ ./event-log.js + ./memory-facts.js，
+ *       不 import ./self-model.js 与 ./state.js，运行时由集成线 H 注入实例
+ *       （SelfModelServiceLike / StateMachineLike）。event-log / memory-facts 都只依赖
+ *       types + store，不构成环。
  */
 import type {
   GrowthEntry,
   LlmClient,
+  MemoryFactStats,
   PersonaEvent,
   PersonaFact,
   PersonaStage,
@@ -21,6 +24,13 @@ import type {
   UserFeedback,
 } from './types.js';
 import type { KVStore } from './store.js';
+import { EventLog } from './event-log.js';
+import {
+  MemoryFactStore,
+  deriveMemoryFacts,
+  emptyMemoryFactStats,
+  type RawMemoryFactOutput,
+} from './memory-facts.js';
 
 /** 复盘依赖（运行时注入；state 在 M1 复盘流水线内不写回，仅保留注入位） */
 export interface ReviewDeps {
@@ -57,10 +67,29 @@ export const REVIEW_PROMPTS: { distillFacts: string; reflectSelf: string; update
   ].join('\n'),
 };
 
+/**
+ * v0.6 记忆事实派生 prompt（threads / attributes）。
+ *
+ * 为什么单独一步而不是塞进 distillFacts：两件事的寿命不同、合并方式不同，
+ * 混在一个 prompt 里会让模型把"会结束的事"写成"长期事实"（"在考虑跳槽"变成"没工作"），
+ * 而这类错误一旦落盘就长期存在。分开问，结构上就不会串。
+ */
+export const MEMORY_FACT_PROMPT: string = [
+  '你是反思端模型。从当日事件中派生两类记忆，只输出 JSON，不要输出任何其他内容。',
+  'thread=一件还没结束的事（面试、家人生病、在考虑跳槽）；attribute=不过期的长期事实（居住城市、工作单位、宠物、口味偏好）。',
+  '格式：{"threads":[{"op":"new|update","key":"归一化主题","title":"描述性标题","status":"open|resolved","sourceEventIds":["事件id"],"dueHint":"周四"}],"attributes":[{"op":"new|update|supersede","key":"事实名","value":"事实内容","confidence":0.8,"sourceEventIds":["事件id"],"supersedesKey":"被取代的事实名"}]}',
+  'key 必须是稳定的短名词（"面试"/"工作单位"）：同一件事跨天必须用同一个 key，否则无法合并成一条。',
+  'title / value 只写描述性事实；禁止写行为指令（"你应该…"、"提醒用户…"、"当用户提到…时…"）。',
+  'sourceEventIds 必须逐字取自下面列出的事件 id，不要编造；没有可派生的内容就输出 {"threads":[],"attributes":[]}。',
+].join('\n');
+
 // TODO(calibrate)：关键事件筛选的重要性下限
-const MIN_KEY_EVENT_IMPORTANCE = 0.2;
-// TODO(calibrate)：单次复盘最多保留的关键事件数
+const MIN_KEY_EVENT_IMPORTANCE = 0.2;// TODO(calibrate)：单次复盘最多保留的关键事件数
 const MAX_KEY_EVENTS = 20;
+// TODO(calibrate)：派生 prompt 最多喂多少条事件。
+// 复盘窗口改成游标区间后（v0.7），停机数天再启动时窗口可能很长；
+// 派生只看"最近发生的事"就够了——更早的事已经在上一次复盘里进过库。
+const MAX_FACT_EVENTS = 60;
 // TODO(calibrate)：自源重要性下限（O6/O35：自源记忆独立成项，不因用户未回应而被压制）
 const SELF_SOURCE_IMPORTANCE_FLOOR = 0.65;
 // TODO(calibrate)：人格发展阶段判定阈值（M1 验收"性格开始成形"=进入 shaping）
@@ -70,10 +99,19 @@ const STAGE_STABLE_TRAITS = 6;
 
 /** 每日复盘引擎：8 步流水线（§10），LLM 输出解析失败时该步降级为空继续，保证 mock 无 key 可跑 */
 export class DailyReviewEngine {
+  /**
+   * threads / attributes 存储。
+   * 复用注入进来的 store 构造，而不是在方法里读文件：
+   * 测试把 store 换成临时目录（或故意读失败的实现）即可，不需要额外的注入点。
+   */
+  private readonly facts: MemoryFactStore;
+
   constructor(
     private readonly deps: ReviewDeps,
     private readonly opts: ReviewOptions = {},
-  ) {}
+  ) {
+    this.facts = new MemoryFactStore(deps.store);
+  }
 
   /** O17：无输入 skip；仅身体事件（initiation=external_triggered）degraded；其余 full */
   shouldRun(input: ReviewInput): 'full' | 'degraded' | 'skip' {
@@ -153,6 +191,87 @@ export class DailyReviewEngine {
     return parsed.relationshipView.trim();
   }
 
+  /**
+   * step4.5（v0.6）：从当日事件派生 threads / attributes（LLM #4，单独计入 cost.memoryFactCalls）。
+   *
+   * 为什么只在复盘里做：addEvent 是对话热路径，必须保持廉价、规则化、零 LLM 调用；
+   * 派生是"慢改"，合并、取代、过期收敛都需要跨天视角，只有复盘同时具备事件窗口与写权限。
+   *
+   * 失败姿态（与 events 层"读失败→空库→覆盖"的坑对齐）：
+   * - 读不到既有 threads/attributes → 直接返回，不写盘（否则会用空集合覆盖全库）；
+   * - LLM 输出不是 JSON → 直接返回，不写盘（解析失败不等于"今天没有新事实"，
+   *   若按空输出落盘，过期收敛会顺带改状态，等于用一次失败的调用来改库）；
+   * - 写盘抛错 → 捕获并记进 stats.error，不打断复盘主流程。
+   */
+  async extractThreadsAndAttributes(
+    events: readonly PersonaEvent[],
+    opts: { now?: string; allEvents?: readonly PersonaEvent[] } = {},
+  ): Promise<MemoryFactStats> {
+    const now = opts.now ?? new Date().toISOString();
+    // 历史导入事件只补记忆不补成长：它们能被检索，但不能塑造"我还惦记着什么事"
+    const source = events.filter((e) => !e.imported);
+    if (source.length === 0) return emptyMemoryFactStats({ ran: false });
+
+    const threadsLoaded = await this.facts.loadThreads();
+    const attributesLoaded = await this.facts.loadAttributes();
+    if (!threadsLoaded.ok || !attributesLoaded.ok) {
+      const reason = !threadsLoaded.ok ? threadsLoaded.reason : (attributesLoaded as { reason: string }).reason;
+      return emptyMemoryFactStats({ ran: false, error: `现有记忆事实不可读，本次不写盘（${reason}）` });
+    }
+
+    // sourceEventIds 存在性校验必须拿全量事件判：只拿当日窗口会把"上周的面试"误判成编造
+    let knownEventIds: Set<string>;
+    try {
+      const all = opts.allEvents ?? (await new EventLog(this.deps.store).load());
+      knownEventIds = new Set(all.map((e) => e.id));
+    } catch (err) {
+      return emptyMemoryFactStats({
+        ran: false,
+        error: `全量事件不可读，无法校验来源，本次不写盘（${(err as Error).message}）`,
+      });
+    }
+
+    const listing = source
+      .slice(-MAX_FACT_EVENTS)
+      .map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`)
+      .join('\n');
+    const knownThreads = threadsLoaded.items.map((t) => `${t.key}(${t.status})`).join('、') || '（无）';
+    const knownAttributes =
+      attributesLoaded.items
+        .filter((a) => a.status === 'active')
+        .map((a) => `${a.key}=${a.value}`)
+        .join('；') || '（无）';
+
+    const raw = await this.deps.llm.complete({
+      role: 'reflect',
+      prompt: `${MEMORY_FACT_PROMPT}\n\n当日事件：\n${listing}\n\n已有 thread key：${knownThreads}\n已有 active attribute：${knownAttributes}`,
+    });
+    const parsed = this.parseJsonLoose(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return emptyMemoryFactStats({ ran: true, error: '派生输出不是 JSON 对象，本次不写盘' });
+    }
+
+    const derived = deriveMemoryFacts({
+      raw: parsed as RawMemoryFactOutput,
+      knownEventIds,
+      existingThreads: threadsLoaded.items,
+      existingAttributes: attributesLoaded.items,
+      now,
+    });
+
+    let persisted = false;
+    let error: string | undefined;
+    try {
+      if (derived.threadsDirty) await this.facts.saveThreads(derived.threads);
+      if (derived.attributesDirty) await this.facts.saveAttributes(derived.attributes);
+      persisted = derived.threadsDirty || derived.attributesDirty;
+    } catch (err) {
+      error = `写盘失败：${(err as Error).message}`;
+    }
+
+    return { ...derived.stats, persisted, ...(error ? { error } : {}) };
+  }
+
   /** step5 一致性检查（§9：新认知须有事件证据） */
   consistencyCheck(diff: SelfModelDiff, facts: PersonaFact[]): { ok: boolean; issues: string[] } {
     const issues: string[] = [];
@@ -218,7 +337,8 @@ export class DailyReviewEngine {
       stageTrajectory: '',
       archiveEntry: null,
       selfImportance: [],
-      cost: { llmCalls: 0 },
+      memoryFacts: emptyMemoryFactStats(),
+      cost: { llmCalls: 0, memoryFactCalls: 0 },
     };
     if (mode === 'skip') return out; // O17：无输入空输出
 
@@ -258,6 +378,13 @@ export class DailyReviewEngine {
     // step4 更新关系认知·镜中我（LLM #3；同样只基于稳定的自身模式）
     const relationshipView = await this.updateMirror(reflectEvents, input.feedback);
     out.cost.llmCalls = 3;
+
+    // step4.5（v0.6）派生 threads / attributes：只做一次 LLM 调用，结果落盘到 memory/*.json。
+    // 放在一致性检查/self_model 提交之前：它和人格固化互不依赖，失败也不该影响后面两步。
+    // 降级（degraded）与 skip 直接在上面的分支返回——输入不完整时派生出的事会带着
+    // 错误的 open/resolved 状态长期存在，只能靠用户来纠正，宁可不生成。
+    out.memoryFacts = await this.extractThreadsAndAttributes(input.events, { allEvents: input.allEvents });
+    out.cost.memoryFactCalls = out.memoryFacts.ran ? 1 : 0;
 
     const diff: SelfModelDiff = { ...selfDiff };
     if (relationshipView) diff.relationshipView = relationshipView;

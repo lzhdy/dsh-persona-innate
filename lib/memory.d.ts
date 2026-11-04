@@ -11,9 +11,19 @@ import { type StripStats } from './directive-strip.js';
 import { EventLog } from './event-log.js';
 import { type RecallSlot } from './recall.js';
 import type { KVStore } from './store.js';
+/**
+ * 未结线索的来源（v0.6）。
+ * 抽成接口而不是在 buildInjection 里直接读文件：
+ * 一是测试可以给内存实现，不必落盘；二是生产侧由集成线注入（保持 PersonaMemory 只管装配）。
+ */
+export interface OpenThreadsSource {
+    loadOpenThreads(): Promise<ReadonlyMap<string, readonly string[]>>;
+}
 export interface MemoryOptions {
     stripDirectives: boolean;
     injectLimit: number;
+    /** 未结线索来源；缺省用同一 store 上的 memory/threads.json */
+    openThreadsSource?: OpenThreadsSource;
 }
 export interface AddResult {
     event: PersonaEvent;
@@ -54,6 +64,8 @@ export declare class PersonaMemory {
     private readonly opts;
     readonly stripStats: StripStats;
     private readonly log;
+    /** v0.6：未结线索来源（store 可注入 → 测试无需真落盘） */
+    private readonly facts;
     /** 软状态：本次会话内的检索时间（不落盘，flush 时随分片重写顺带持久化） */
     private softDirty;
     constructor(store: KVStore, opts: MemoryOptions);
