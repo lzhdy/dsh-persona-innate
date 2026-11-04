@@ -1,24 +1,33 @@
 /**
- * v0.7 情绪衰减接线测试（装配级，不是 sm.decay() 单测）
+ * v0.7 情绪衰减接线测试
  *
  * 背景：decay(dtMs) 早就实现好了，但真实会话链路从不调用它（唯一调用点是评测门面），
  * 于是效价只被事件推高、永不复原——本机实测 36 分钟 −0.03 → 0.53，11 次更新 10 次上升。
  *
- * 所以这里测的不是"衰减公式对不对"（公式本轮不改），而是：
- * 用真实 PersonaStateMachine + 真实落盘的 state.json 走一遍"跨进程两轮会话"，
- * 断言效价确实回落，且回落只发生在接线函数被调用时（对照组不回落）。
+ * 分两层，缺一不可：
+ * - **装配级（A1/A4）**：走真实 cordis 装配（apply + session/event + 真实 state.json），
+ *   断言落盘的效价被衰减过；再加一条静态守卫锁住"perceiveEvent 里真的调了衰减、且在 apply 之前"。
+ *   这两条是必要的：只要把它们删掉，"把 index.ts 的衰减调用注释掉" 依然能全绿
+ *   —— 本项目已经出现过三次「组件级绿、装配级无覆盖」（decay 有单测但主链路不调用、
+ *   traceableInferred 有单测但装配入口不校验、衰减接线自身）。
+ * - 函数级（A2/A3/A5/A6/A7）：decayForIdleGap / 串行队列的判据与边界。
+ *   它们只回答"函数被调用时算得对不对"，**不能**证明接线存在。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Context } from '@deepseek-ai/cordis';
 import { JsonStore } from '../lib/store.js';
 import { PersonaStateMachine } from '../lib/state.js';
 import { DECAY_MIN_INTERVAL_MS, createSerialQueue, decayForIdleGap } from '../lib/state-decay.js';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = join(HERE, '..');
 
 function tempFs(root) {
   return {
@@ -48,8 +57,13 @@ async function freshStore() {
   return new JsonStore(tempFs(dir), dir);
 }
 
-/** 直接落一份 state.json：模拟"上次更新发生在 hoursAgo 小时前"的跨进程现场 */
-async function seedState(store, { valence, hoursAgo }) {
+/**
+ * 直接落一份 state.json：模拟"上次更新发生在 hoursAgo 小时前"的跨进程现场。
+ *
+ * 48h 是刻意选的：半衰 24h → 因子 0.25，效价 0.8 → 0.2，与"完全不衰减"的 0.8 相差 0.6，
+ * 而一次 apply 的抬升量只有 +0.06 量级 —— 断言因此能真正区分"接了衰减"和"没接"。
+ */
+async function seedStateAt(dir, { valence, hoursAgo }) {
   const updatedAt = new Date(Date.now() - hoursAgo * HOUR).toISOString();
   const state = {
     valenceMean: valence,
@@ -68,8 +82,74 @@ async function seedState(store, { valence, hoursAgo }) {
     history: [],
     updatedAt,
   };
-  await writeFile(join(store.root, 'state.json'), JSON.stringify(file, null, 2), 'utf-8');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'state.json'), JSON.stringify(file, null, 2), 'utf-8');
   return state;
+}
+
+/** 同上的 store 版（函数级用例用） */
+async function seedState(store, opts) {
+  return seedStateAt(store.root, opts);
+}
+
+async function readIfExists(path) {
+  try {
+    return await readFile(path, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+async function waitFor(pred, timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    let ok = false;
+    try {
+      ok = await pred();
+    } catch {
+      ok = false;
+    }
+    if (ok) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('waitFor 超时');
+}
+
+/** 懒加载插件 apply（lib/index.js 顶层有 peer 依赖解析，放在用例里 import 更稳） */
+let applyRef = null;
+async function loadPluginApply() {
+  if (!applyRef) {
+    const mod = await import(pathToFileURL(join(REPO, 'lib', 'index.js')).href);
+    applyRef = mod.apply;
+  }
+  return applyRef;
+}
+
+/**
+ * 在真实 cordis 运行时里装配插件（llmMode=mock，全链路 mock）。
+ * reviewEnabled=false：本组只验感知链路，关掉定时复盘避免噪声与时序干扰。
+ */
+async function assemblePlugin({ dataDir }) {
+  const applyPlugin = await loadPluginApply();
+  const root = new Context();
+  root.provide('fs', tempFs(dataDir));
+  root.provide('tools', { register: () => () => {} });
+  root.provide('systemPrompt', { context: () => () => {} });
+  root.provide('commands', { register: () => () => {} });
+  const fiber = await root.plugin(applyPlugin, {
+    dataDir,
+    sampleRounds: 3,
+    injectLimit: 5,
+    stripDirectives: true,
+    model: 'test-model',
+    selfModelHistoryLimit: 10,
+    reviewEnabled: false,
+    reviewHour: 2,
+    honestyCeiling: 0.2,
+    auditRounds: [50, 200],
+    llmMode: 'mock',
+  });
+  return { root, fiber };
 }
 
 function ev(id, over = {}) {
@@ -88,9 +168,102 @@ function ev(id, over = {}) {
 
 const GOALS = { user: ['日常'], self: [] };
 
-/* ── 1. 时间跳跃后效价必须回落（这是本次修复的核心断言） ───────── */
+/* ── 0. 装配级：真实 cordis 链路 + 静态守卫（删掉接线必须变红） ───── */
 
-test('v0.7-A1: 空闲 2 小时后 decayForIdleGap 让效价回落（旧接线下只升不降）', async () => {
+/**
+ * 为什么必须有一条走真实装配的用例：
+ * QA 的变异实验证明——把 index.ts 里的 `await decayForIdleGap(stateMachine);` 注释掉，
+ * 函数级用例全绿、一条不红。因为"衰减算得对"和"衰减被调用"是两件事，
+ * 而这次要修的正是后者。
+ *
+ * 48 小时空闲的算术：半衰 24h → 因子 0.25，0.8 → 0.2；本轮事件只抬升 ≈+0.06。
+ * 接了衰减 ≈0.26，没接 ≈0.86 —— 阈值取 0.5，两边的差距不可能互相冒充。
+ */
+test('v0.7-A1（装配级核心）：48 小时空闲后第一轮对话，落盘效价必须已被衰减', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'persona-wire-'));
+  const dataDir = join(dir, 'persona-innate');
+  await seedStateAt(dataDir, { valence: 0.8, hoursAgo: 48 });
+
+  const { root, fiber } = await assemblePlugin({ dataDir });
+  try {
+    root.emit('app/ready');
+    // 等状态机从 48h 前的 state.json 载入（注入预热会触发 ensureLoaded）
+    await waitFor(async () => (await readIfExists(join(dataDir, 'state.json'))) !== null);
+
+    // 一条中性工作消息：importance 0.8、无情感标签 → apply 的抬升量很小（约 +0.06）
+    root.emit(
+      'session/event',
+      {},
+      {
+        type: 'user/message',
+        data: {
+          role: 'user',
+          source: { kind: 'user' },
+          content: [{ type: 'text', text: '今天下午三点我在开会，讨论了下季度的排期安排' }],
+        },
+      },
+    );
+
+    await waitFor(async () => {
+      const raw = await readFile(join(dataDir, 'state.json'), 'utf-8');
+      return JSON.parse(raw).history.length >= 1;
+    });
+
+    const after = JSON.parse(await readFile(join(dataDir, 'state.json'), 'utf-8'));
+    const v = after.state.valenceMean;
+    assert.ok(
+      v < 0.5,
+      `落盘效价应已被 48h 空闲衰减拉回低位（期望 ≈0.26；未接线会 ≈0.86），实际 ${v}`,
+    );
+    assert.ok(v > 0, `衰减不得穿过基线（效价应保持为正），实际 ${v}`);
+    assert.equal(after.history.length, 1, '本轮应恰好 apply 一次');
+  } finally {
+    await fiber.dispose();
+  }
+});
+
+/**
+ * 静态守卫：装配级用例依赖"能跑起来 + 有事件"，成本高且易受环境干扰；
+ * 这一条用源码层面的最小证据把接线钉住（读 src/index.ts，先剥注释行——
+ * 朴素文本搜索会被注释掉的调用骗过，QA 第一版就栽在这里）。
+ */
+test('v0.7-A4（静态守卫）：perceiveEvent 内衰减调用必须存在且先于 apply；门禁先于游标协议', async () => {
+  const src = await readFile(join(REPO, 'src', 'index.ts'), 'utf-8');
+  // 剥掉注释行（整行 // / 块注释 / JSDoc 续行），避免"注释里的调用"冒充真实接线
+  const code = src
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return t.length > 0 && !t.startsWith('//') && !t.startsWith('/*') && !t.startsWith('*');
+    })
+    .join('\n');
+
+  const peStart = code.indexOf('const perceiveEvent = async');
+  assert.ok(peStart > 0, '应能找到 perceiveEvent 定义');
+  const peEnd = code.indexOf('const stateFacade', peStart);
+  assert.ok(peEnd > peStart, '应能找到 perceiveEvent 的结束边界（stateFacade 之前）');
+  const peBody = code.slice(peStart, peEnd);
+
+  const decayAt = peBody.indexOf('await decayForIdleGap(stateMachine)');
+  const applyAt = peBody.indexOf('await stateMachine.apply(event, goals)');
+  assert.ok(decayAt > 0, 'perceiveEvent 函数体内必须真的调用衰减（只 import 不算接线）');
+  assert.ok(applyAt > decayAt, '衰减必须在 apply 之前（否则等于用空闲时长打折刚发生的事）');
+
+  // 复盘门禁必须早于游标协议：否则被门禁拦下的那天会被游标跳过，永远不再复盘
+  const gateAt = code.indexOf("if (llmNow.synthetic && config.llmMode !== 'mock')");
+  const protocolAt = code.indexOf('await runReviewWithCursor(');
+  assert.ok(gateAt > 0, '应能找到复盘门禁');
+  assert.ok(protocolAt > gateAt, '门禁 return 必须发生在进入游标协议之前');
+
+  // 行号证据（汇报里要贴）
+  const lineOf = (needle) => src.split('\n').findIndex((l) => l.includes(needle)) + 1;
+  assert.ok(lineOf('await decayForIdleGap(stateMachine)') > 0);
+  assert.ok(lineOf('await stateMachine.apply(event, goals)') > lineOf('await decayForIdleGap(stateMachine)'));
+});
+
+/* ── 1. 函数级：时间跳跃后效价必须回落 ───────────────────────── */
+
+test('v0.7-A1b（函数级）: 空闲 2 小时后 decayForIdleGap 让效价回落（旧接线下只升不降）', async () => {
   const store = await freshStore();
   await seedState(store, { valence: 0.7, hoursAgo: 2 });
 
@@ -112,9 +285,9 @@ test('v0.7-A1: 空闲 2 小时后 decayForIdleGap 让效价回落（旧接线下
   assert.ok(after.state.valenceMean > 0.6, '2 小时不该把效价打到接近 0（惯性仍在）');
 });
 
-/* ── 2. 接线与否必须产生可观测差异（对照组不回落） ─────────────── */
+/* ── 2. 函数级：接不接衰减产生可观测差异（对照组不回落） ─────────── */
 
-test('v0.7-A2: 同样的两轮会话，走接线（先衰减再应用）比不走接线的终态更低', async () => {
+test('v0.7-A2（函数级，不能替代 A1）: 两轮会话里先衰减再应用，终态低于只应用不衰减', async () => {
   const controlStore = await freshStore();
   const wiredStore = await freshStore();
   await seedState(controlStore, { valence: 0.7, hoursAgo: 2 });
@@ -155,7 +328,7 @@ test('v0.7-A3: 距上次更新不足 1 分钟不衰减，避免每轮无谓写�
   assert.equal((await sm.snapshot()).state.valenceMean, 0.7);
 });
 
-test('v0.7-A4: 时间戳异常 / 快照读失败 → 不衰减且不抛（衰减是修正项，不能打断主链路）', async () => {
+test('v0.7-A4b: 时间戳异常 / 快照读失败 → 不衰减且不抛（衰减是修正项，不能打断主链路）', async () => {
   const badTime = {
     async snapshot() {
       return { state: { updatedAt: 'not-a-date' } };

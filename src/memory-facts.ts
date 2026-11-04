@@ -4,7 +4,7 @@
  * 机制依据见 types.ts 中 PersonaThread / PersonaAttribute 的注释；本文件负责三件事：
  * 1. 存储：memory/threads.json + memory/attributes.json，原子写；
  *    读失败绝不退化成"空库 + 下次覆盖"（events 层踩过的同一个坑）。
- * 2. 派生：把 LLM 的输出（不可信）变成可信条目——stripCheck 门禁 + sourceEventIds 存在性校验，
+ * 2. 派生：把 LLM 的输出（不可信）变成可信条目——stripMemoryFact（严口径）门禁 + sourceEventIds 存在性校验，
  *    校验不过整条丢弃（不补空数组、不降置信度凑数）。
  * 3. 合并：thread 按 key 跨天合并（重复提及是信号不是噪音）；
  *    attribute 按 key+value 提置信度，同 key 不同 value 则旧条 superseded。
@@ -22,7 +22,7 @@ import type {
   ThreadStatus,
   ThreadsFile,
 } from './types.js';
-import { stripCheck } from './directive-strip.js';
+import { stripMemoryFact } from './directive-strip.js';
 import { MS_PER_DAY } from './recall.js';
 import type { KVStore } from './store.js';
 
@@ -310,6 +310,7 @@ export function emptyMemoryFactStats(patch: Partial<MemoryFactStats> = {}): Memo
     attributesSuperseded: 0,
     dropped: 0,
     dropReasons: { 'no-source': 0, 'unknown-source': 0, strip: 0, invalid: 0 },
+    fieldsStripped: 0,
     expired: 0,
     ...patch,
   };
@@ -358,6 +359,26 @@ function clamp01(n: number): number {
   return n < 0 ? 0 : n > 1 ? 1 : n;
 }
 
+/**
+ * dueHint 门禁（v0.7）。
+ *
+ * 它是 thread 里唯一没过门禁的 LLM 自由文本字段，而且会在 `/persona threads`
+ * 里被渲染出来——等于给"给模型写行为脚本"留了一个旁路。门禁口径与 title/value 一致。
+ *
+ * 处理方式与整条丢弃不同：hint 只是可选装饰，坏了丢字段、保留 thread（事实本身没问题），
+ * 单独计进 fieldsStripped，不污染 dropped / dropReasons 的"整条丢弃"语义。
+ */
+function sanitizeDueHint(raw: unknown, stats: MemoryFactStats): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const hint = raw.trim();
+  if (!hint) return undefined;
+  if (!stripMemoryFact(hint).ok) {
+    stats.fieldsStripped += 1;
+    return undefined;
+  }
+  return hint;
+}
+
 function asStatus(v: unknown): ThreadStatus | null {
   if (v === 'open' || v === 'resolved' || v === 'expired') return v;
   return null;
@@ -368,7 +389,7 @@ function asStatus(v: unknown): ThreadStatus | null {
  *
  * 门禁顺序（先便宜后昂贵，且丢弃原因要能解释）：
  * 1. 字段形状（key/title/value/status）→ 'invalid'
- * 2. stripCheck（不许 LLM 给自己写行为脚本）→ 'strip'
+ * 2. stripMemoryFact（不许 LLM 给自己写行为脚本；派生层用严口径）→ 'strip'
  * 3. sourceEventIds 存在性 → 'no-source' / 'unknown-source'
  * 4. 合并（只有全部门禁通过的条目才有资格改库）
  */
@@ -394,7 +415,7 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
       continue;
     }
     // 门禁：title 是最终会进注入文本的字段，含祈使句整条丢弃
-    if (!stripCheck(title).ok) {
+    if (!stripMemoryFact(title).ok) {
       drop(stats, 'strip');
       continue;
     }
@@ -414,7 +435,7 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
     // LLM 漏标/错标 op 时不该产生第二条同名 thread。
     const id = threadId(key);
     const existing = threads.find((t) => t.id === id) ?? threads.find((t) => t.key === key);
-    const dueHint = typeof cand.dueHint === 'string' && cand.dueHint.trim() ? cand.dueHint.trim() : undefined;
+    const dueHint = sanitizeDueHint(cand.dueHint, stats);
 
     if (!existing) {
       threads.push({
@@ -475,7 +496,7 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
       continue;
     }
     // 门禁：value 会进注入，含祈使句整条丢弃
-    if (!stripCheck(value).ok) {
+    if (!stripMemoryFact(value).ok) {
       drop(stats, 'strip');
       continue;
     }

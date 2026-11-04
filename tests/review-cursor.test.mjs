@@ -2,7 +2,8 @@
  * v0.7 复盘游标测试
  *
  * 覆盖旧实现的三个故障：
- * 1. UTC 日期切片 → 本地 00:00–08:00 的事件永远不被任何一次复盘看到（深夜陪伴高峰）
+ * 1. UTC 日期切片 → 本地 00:00–01:59 与 08:00–23:59 看得到，02:00–07:59 永远不被任何一次复盘看到
+ *    （本机 UTC+8、复盘固定在 02:00 时穷举实测；深夜陪伴高峰正好落在缺口里）
  * 2. 没有游标 → 02:00 进程不在就永久丢一天
  * 3. 没有幂等 → 手动与定时可对同一天重复提交，产生两个 self_model 版本
  *
@@ -324,4 +325,76 @@ test('v0.7-B7: 启动补跑只在"无游标"或"距上次 ≥24h"时触发', () 
     '25 小时前 → 补跑（02:00 的定时器没跑成）',
   );
   assert.equal(shouldCatchUpReview('garbage', now), true, '游标不可解析 → 按无游标处理');
+});
+
+/* ── 8. 启动补跑的窗口上界：只补"进程不在期间"的事件 ────────── */
+
+test('v0.7-B8: 启动补跑带上界 until —— 本次会话刚写的事件不算缺口，且不会被游标跳过', async () => {
+  // 真实故障（并行跑测试时稳定复现）：进程启动 → 用户开口 → 事件落盘 →
+  // 补跑这时才跑到 runDailyReview，于是把"本次会话的事件"也当成历史缺口复盘了一遍，
+  // 和紧随其后的手动 /persona review 抢同一个窗口（抢输了手动那条只能报
+  // "上一次复盘仍在进行中"）。补跑的正确口径是 (游标, 启动时刻]。
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+  const readyAtMs = Date.now();
+  const readyAt = new Date(readyAtMs);
+
+  const downtime = ev('e_downtime', isoAt(readyAtMs - 3 * HOUR)); // 进程不在期间产生的
+  const live = ev('e_live', isoAt(readyAtMs + 50)); // 启动之后、本次会话产生的
+  const atReady = ev('e_at_ready', isoAt(readyAtMs)); // 与启动同一毫秒（边界）
+
+  const seen = [];
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: [downtime, live, atReady],
+    until: readyAt,
+    now: new Date(readyAtMs + 1000),
+    review: async ({ events }) => {
+      seen.push(...events.map((e) => e.id));
+      return fakeOut('2026-11-04');
+    },
+  });
+
+  assert.equal(outcome.kind, 'done');
+  assert.deepEqual(seen, ['e_downtime'], `补跑只该看到停机期间的事件，实际：${JSON.stringify(seen)}`);
+
+  // 游标停在右端 until，不是补跑结束的时刻：live 事件必须留在下一次窗口里
+  const saved = await cursorStore.load();
+  assert.ok(saved.ok);
+  assert.equal(saved.cursor.lastReviewAt, isoAt(readyAtMs), '游标右端 = 启动时刻');
+
+  // 下一次（手动 / 定时）复盘把 live 事件补上——这是"上界不等于丢事件"的证明
+  const nextSeen = [];
+  const next = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: [downtime, live, atReady],
+    now: new Date(readyAtMs + 2000),
+    review: async ({ events }) => {
+      nextSeen.push(...events.map((e) => e.id));
+      return fakeOut('2026-11-04');
+    },
+  });
+  assert.equal(next.kind, 'done');
+  assert.ok(nextSeen.includes('e_live'), `启动后写入的事件必须被下一次复盘收走，实际：${JSON.stringify(nextSeen)}`);
+});
+
+test('v0.7-B8b: 补跑窗口为空（启动前没有新事件）→ skipped，不推进游标、不调用 LLM', async () => {
+  const store = await freshStore();
+  const cursorStore = new ReviewCursorStore(store);
+  const readyAtMs = Date.now();
+
+  const outcome = await runReviewWithCursor({
+    store,
+    cursorStore,
+    allEvents: [ev('e_live', isoAt(readyAtMs + 10))],
+    until: new Date(readyAtMs),
+    now: new Date(readyAtMs + 500),
+    review: async () => {
+      throw new Error('窗口为空时不该调用复盘');
+    },
+  });
+
+  assert.equal(outcome.kind, 'skipped');
 });

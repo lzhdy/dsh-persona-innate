@@ -487,6 +487,12 @@ export interface MemoryFactStats {
     /** 被丢弃的条目总数（= dropReasons 之和） */
     dropped: number;
     dropReasons: Record<FactDropReason, number>;
+    /**
+     * 被门禁剥掉的**字段**数（v0.7）。
+     * 与 dropped 分开计数：dueHint 这类可选装饰字段不过门禁时只丢字段、保留条目本身，
+     * 把它算进"条目丢弃"会让 dropped 与 dropReasons 对不上，也会让"整条丢弃"的语义贬值。
+     */
+    fieldsStripped: number;
     /** 本次收敛为 expired 的 thread 数 */
     expired: number;
     /** 未能完成的原因（读盘失败 / 解析失败 / 写盘失败），供 /persona review 展示 */

@@ -41,12 +41,15 @@ export declare class EventLog {
     private cache;
     private loadedMonths;
     private migrationChecked;
+    /** 正在进行的首次加载；并发调用共享同一个 promise（见 load 的注释） */
+    private loading;
     private readonly dir;
     private readonly legacyPath;
     constructor(store: KVStore, opts?: EventLogOptions);
     private pathOf;
     private get manifestPath();
     load(): Promise<PersonaEvent[]>;
+    private doLoad;
     /** 只读快照（返回副本数组，元素仍为内部引用） */
     list(): Promise<PersonaEvent[]>;
     /** 追加一条事件：只写当月分片，O(1)，绝不重写历史月份 */

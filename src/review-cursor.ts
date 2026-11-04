@@ -2,9 +2,11 @@
  * 复盘游标（v0.7）：把复盘窗口从"日期切片"改成"上次复盘时刻 → 现在"
  *
  * 旧实现的问题（index.ts 里 `new Date().toISOString().slice(0,10)` + 日期等值过滤）：
- * 1. toISOString 是 UTC。本地 02:00 执行时切片是"UTC 的前一天"，窗口实际覆盖
- *    本地前一天 08:00 → 当天 07:59；本地 00:00–08:00 发生的事件永远不被任何一次复盘看到
- *    —— 正好是深夜陪伴高峰。
+ * 1. toISOString 是 UTC。本地 02:00 执行时切片是"UTC 的前一天"，那一次窗口实际覆盖
+ *    本地前一天 08:00 → 当天 07:59。按本机 UTC+8 穷举（每小时的整点事件 × 之后几次 02:00 复盘）：
+ *    本地 **02:00–07:59** 的事件永远不被任何一次复盘看到，其余 18 个小时看得到。
+ *    （00:00–01:59 幸免：它们与当晚 02:00 那次复盘同属"UTC 的前一天"。）
+ *    02:00–07:59 正好压在深夜陪伴高峰上，所以这个缺口不是理论问题。
  * 2. 没有游标：02:00 进程不在（DSH web 常关）就永久丢一天，靠"日期"补不回来。
  * 3. 没有幂等：手动 /persona review 与定时任务可对同一天重复提交，产生两个 self_model 版本。
  *
@@ -83,7 +85,7 @@ export class ReviewCursorStore {
   }
 }
 
-/** 本地零点（毫秒）。刻意不用 toISOString 切片：UTC 切片的"今天"在本地 00:00–08:00 是前一天 */
+/** 本地零点（毫秒）。刻意不用 toISOString 切片：UTC 切片的"今天"在本地 02:00 前后会指向前一天 */
 export function localDayStart(now: Date): number {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
 }
@@ -100,17 +102,24 @@ export function localDateString(now: Date): string {
  * 没有游标就没有可靠的区间起点，用当日零点是最保守的近似（宁可漏掉升级前的历史，
  * 也不要把一年前的旧事件当成"今天发生的事"再复盘一遍）。
  * 时间戳不可解析的事件直接排除（无法确定它属于哪段窗口）。
+ *
+ * `until` 是可选的上界（开区间）。只有启动补跑会传它：补跑要补的是"进程不在期间"的缺口，
+ * 不该把本次会话刚刚写入的事件也算进来（那既浪费一次 LLM 调用，又会和紧随其后的
+ * 手动 /persona review 抢同一个窗口）。传上界时窗口变成 (from, until)，闭区间会让
+ * "启动那一毫秒写入的事件"挤进补跑，因此这里取严格小于。
  */
 export function selectReviewWindow(
   events: readonly PersonaEvent[],
   cursorAt: string | null,
   now: Date,
+  until: Date | null = null,
 ): PersonaEvent[] {
   const parsedCursor = cursorAt ? Date.parse(cursorAt) : Number.NaN;
   const from = Number.isFinite(parsedCursor) ? parsedCursor : localDayStart(now);
+  const upper = until ? until.getTime() : Number.POSITIVE_INFINITY;
   return events.filter((e) => {
     const t = Date.parse(e.time);
-    return Number.isFinite(t) && t > from;
+    return Number.isFinite(t) && t > from && t < upper;
   });
 }
 
@@ -140,7 +149,9 @@ export type ReviewWindowOutcome =
  * 三条规矩，每条都对应一个具体故障：
  * 1. 窗口为空 → 不推进。否则会把"没有新事件"记成"已复盘到此刻"，把之后的事件吞掉。
  * 2. 复盘没产出（门禁/异常）→ 不推进。否则那天永远不会再复盘（游标跳过了它）。
- * 3. 成功 → 推进到"本次开始时刻"，不是结束时刻：复盘期间新写入的事件必须落在下一次窗口里。
+ * 3. 成功 → 推进到"本次窗口的右端"，不是复盘结束时刻：复盘期间新写入的事件必须落在下一次窗口里。
+ *    （普通路径的右端就是 startedAt；启动补跑传了 until 时右端是 until，
+ *      这样 until 之后、补跑执行期间写入的事件不会因为游标跳过去而丢失。）
  */
 export async function runReviewWithCursor(opts: {
   store: KVStore;
@@ -154,11 +165,14 @@ export async function runReviewWithCursor(opts: {
   }) => Promise<ReviewOutput | null>;
   /** 注入时钟（测试用） */
   now?: Date;
+  /** 窗口上界（启动补跑用）：只复盘 until 之前写入的事件 */
+  until?: Date | null;
   /** 注入游标存储（测试可换成读失败实现） */
   cursorStore?: ReviewCursorStore;
 }): Promise<ReviewWindowOutcome> {
   const startedAt = opts.now ?? new Date();
   const startedIso = startedAt.toISOString();
+  const until = opts.until ?? null;
   const cursorStore = opts.cursorStore ?? new ReviewCursorStore(opts.store);
 
   const loaded = await cursorStore.load();
@@ -168,12 +182,12 @@ export async function runReviewWithCursor(opts: {
   }
 
   const from = loaded.cursor?.lastReviewAt ?? null;
-  const window = selectReviewWindow(opts.allEvents, from, startedAt);
+  const window = selectReviewWindow(opts.allEvents, from, startedAt, until);
   if (window.length === 0) {
     return {
       kind: 'skipped',
       reason: from
-        ? `上次复盘（${from}）之后没有新事件，跳过`
+        ? `上次复盘（${from}）之后${until ? `、${until.toISOString()} 之前` : ''}没有新事件，跳过`
         : '还没有可复盘的记忆事件，跳过',
       startedAt: startedIso,
     };
@@ -196,7 +210,9 @@ export async function runReviewWithCursor(opts: {
 
   let cursorWarning: string | undefined;
   try {
-    await cursorStore.save({ version: 1, lastReviewAt: startedIso, lastReviewDate: date });
+    // 右端而不是"结束时刻"：补跑时右端是 until，此后写入的事件留给下一次窗口
+    const rightEdge = (until ?? startedAt).toISOString();
+    await cursorStore.save({ version: 1, lastReviewAt: rightEdge, lastReviewDate: date });
   } catch (err) {
     // 游标写失败不改判"复盘成功"这个事实（内容已经提交了），但必须留痕：
     // 下一次会重复覆盖同一段窗口，值得在日志里看见。

@@ -127,7 +127,7 @@ export declare function emptyMemoryFactStats(patch?: Partial<MemoryFactStats>): 
  *
  * 门禁顺序（先便宜后昂贵，且丢弃原因要能解释）：
  * 1. 字段形状（key/title/value/status）→ 'invalid'
- * 2. stripCheck（不许 LLM 给自己写行为脚本）→ 'strip'
+ * 2. stripMemoryFact（不许 LLM 给自己写行为脚本；派生层用严口径）→ 'strip'
  * 3. sourceEventIds 存在性 → 'no-source' / 'unknown-source'
  * 4. 合并（只有全部门禁通过的条目才有资格改库）
  */

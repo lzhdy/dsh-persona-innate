@@ -60,6 +60,8 @@ export class EventLog {
   private cache: PersonaEvent[] | null = null;
   private loadedMonths: string[] = [];
   private migrationChecked = false;
+  /** 正在进行的首次加载；并发调用共享同一个 promise（见 load 的注释） */
+  private loading: Promise<PersonaEvent[]> | null = null;
 
   private readonly dir: string;
   private readonly legacyPath: string;
@@ -83,6 +85,22 @@ export class EventLog {
   /* ───────────── 加载 ───────────── */
 
   async load(): Promise<PersonaEvent[]> {
+    if (this.cache) return this.cache;
+    // 并发首次加载必须共享同一个 promise。
+    // 否则两个 load 各扫一份（此时磁盘上还没有新事件），各自 `this.cache = 自己的数组`；
+    // 后赋值的那个会让另一次 append 刚 push 进去的数组变成孤儿——事件在磁盘上、进程内却看不见。
+    // append 的写法是 `const list = await this.load(); ...; list.push(event)`，
+    // 所以"看不见"会一直持续到进程重启：注入漏掉它，复盘窗口也是空的。
+    // （实测：25 次真实装配里有 1 次触发，表现是 /persona review 报"还没有可复盘的记忆事件"。）
+    if (!this.loading) {
+      this.loading = this.doLoad().finally(() => {
+        this.loading = null;
+      });
+    }
+    return this.loading;
+  }
+
+  private async doLoad(): Promise<PersonaEvent[]> {
     if (this.cache) return this.cache;
     await this.ensureMigrated();
 
@@ -138,8 +156,11 @@ export class EventLog {
     const month = monthKeyOf(event.time);
     await this.store.appendText(this.pathOf(month), `${JSON.stringify(event)}\n`);
     await this.noteMonth(month);
-    list.push(event);
-    this.stats.total = list.length;
+    // push 到"当前 cache"而不是 load 返回的那个引用：写入期间（appendText/noteMonth 都是 await）
+    // cache 有可能被换过，push 到已作废的数组等于这条事件在进程内不存在。
+    const target = this.cache ?? list;
+    target.push(event);
+    this.stats.total = target.length;
   }
 
   /** 批量追加（import-chat）：按月聚合，一次写一片 */
@@ -160,8 +181,9 @@ export class EventLog {
       await this.noteMonth(month);
     }
 
-    list.push(...events);
-    this.stats.total = list.length;
+    const target = this.cache ?? list;
+    target.push(...events);
+    this.stats.total = target.length;
   }
 
   /**

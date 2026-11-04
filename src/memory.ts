@@ -8,7 +8,7 @@
  */
 import type { PersonaEvent, Provenance } from './types.js';
 import { provenanceLabel, isProvenance } from './provenance.js';
-import { createStripStats, recordStrip, stripCheck, type StripStats } from './directive-strip.js';
+import { createStripStats, recordStrip, stripCheck, stripMemoryFact, type StripStats } from './directive-strip.js';
 import { dedupKey } from './extract.js';
 import { EventLog } from './event-log.js';
 import { MemoryFactStore } from './memory-facts.js';
@@ -134,6 +134,9 @@ export class PersonaMemory {
 
     let strip: ReturnType<typeof stripCheck> | null = null;
     if (this.opts.stripDirectives) {
+      // 写入用**宽口径**：只拦角色卡/系统指令注入。
+      // "你要多关心我"这类对 AI 的要求仍会落盘（原话是用户需求，复盘要拿它产出描述性事实），
+      // 它由注入前的严口径二次校验挡住，不进 prompt。
       strip = stripCheck(text);
       recordStrip(this.stripStats, strip);
       if (!strip.ok) {
@@ -259,11 +262,13 @@ export class PersonaMemory {
       )
       .map((it) => it.event);
 
-    // 二次校验：注入前再次剥离检查，命中则不注入（诚实基线）
+    // 二次校验：注入前再次剥离检查，命中则不注入（诚实基线）。
+    // 这里用**严口径**（stripMemoryFact）：写入用的是宽口径，所以"你要多关心我"这类句子
+    // 会正常落盘（原话留着可复盘），但绝不进 prompt —— 落盘与注入的分工就落在这个差异上。
     const injectable = items.filter((it) => {
       if (pendingReconcile.includes(it.event)) return false;
       if (!this.opts.stripDirectives) return true;
-      const r = stripCheck(`${it.event.topic}：${it.event.summary}`);
+      const r = stripMemoryFact(`${it.event.topic}：${it.event.summary}`);
       recordStrip(this.stripStats, r);
       return r.ok;
     });

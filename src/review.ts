@@ -80,6 +80,10 @@ export const MEMORY_FACT_PROMPT: string = [
   '格式：{"threads":[{"op":"new|update","key":"归一化主题","title":"描述性标题","status":"open|resolved","sourceEventIds":["事件id"],"dueHint":"周四"}],"attributes":[{"op":"new|update|supersede","key":"事实名","value":"事实内容","confidence":0.8,"sourceEventIds":["事件id"],"supersedesKey":"被取代的事实名"}]}',
   'key 必须是稳定的短名词（"面试"/"工作单位"）：同一件事跨天必须用同一个 key，否则无法合并成一条。',
   'title / value 只写描述性事实；禁止写行为指令（"你应该…"、"提醒用户…"、"当用户提到…时…"）。',
+  // 这条不是可选的礼貌建议：派生层用严口径门禁（stripMemoryFact），
+  // 直接复述「你要多关心我」会被整条拦下 —— 那等于把一条真实需求白丢。
+  // 正确做法是把它翻译成事实（"用户提过希望被更多关心"），这样它才既进得了库也进得了注入。
+  '若用户表达的是对 AI 的要求（如"你要多关心我"），请改写成描述该需求的事实陈述（如"用户提过希望被更多关心"），不要复述原话的祈使句式。',
   'sourceEventIds 必须逐字取自下面列出的事件 id，不要编造；没有可派生的内容就输出 {"threads":[],"attributes":[]}。',
 ].join('\n');
 
