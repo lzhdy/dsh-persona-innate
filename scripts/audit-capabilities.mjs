@@ -323,7 +323,7 @@ const ITEMS = [
     milestone: 'M6',
     status: 'partial',
     witnesses: [{ label: 'IM 通道', pattern: 'qqbot|qq-bridge|imChannel', definedIn: '__none__', expectIn: [] }],
-    note: '决策：观察期用官方 @tencent-connect/dsh-qqbot 作通道；身体级实现（经历回报）需自研，见 docs/im-channel-evaluation.md',
+    note: '2026-11-04 运行期打通：官方 0.5.5 + 私聊 allowlist + 群聊 disabled，QQ 收发正常，persona 四个注入块确实到达 QQ 会话（用 session.v4.jsonl.zstd 逐帧解压验证）。仍是 partial：身体级实现（经历回报/initiation）需自研，见 docs/im-channel-evaluation.md',
   },
   {
     id: 'M7-local-app',

@@ -351,3 +351,106 @@ grep -rn "initiation\|self_initiated\|user_initiated" <每个包>/lib/
 | 日期 | 版本 | 变更 |
 |---|---|---|
 | 2026-11-04 | v1 | 初版。五候选源码取证、官方 0.5.5 深挖（含主动消息形态、零配额、会话映射、兼容性缺口）、观察期决策与验收 |
+| 2026-11-04 | v2 | 追加 §8 运行期验收记录 |
+
+---
+
+## 10. 运行期验收记录（2026-11-04）
+
+按 §5.2 装配后的实测结果与踩到的坑。**这一节是给未来的自己看的：同样的坑不必踩两次。**
+
+### 10.1 手动配置路径（不扫码）
+
+用户不在电脑旁，无法扫码，改用 q.qq.com 手动创建机器人 + 手填 `appId`/`appSecret`。这条路可行，但有两个坑：
+
+**坑一：AppSecret 二次查看会重置。**
+第一次填的 secret 在 14:33–14:37 之间是有效的（网关 `Bot ready!`、消息收发正常），14:42 重启后失效。中间只发生过一件事——用户为了把完整 secret 抄给助手，**再次打开了那个页面**。
+
+排查方法（不要猜，直接打官方接口）：
+
+```bash
+curl -s -X POST https://bots.qq.com/app/getAppAccessToken \
+  -H "Content-Type: application/json" \
+  -d '{"appId":"<appid>","clientSecret":"<secret>"}'
+# 有效 → {"access_token":"...","expires_in":6089}
+# 无效 → {"code":100016,"message":"invalid appid or secret"}
+```
+
+`api.bot.qq.com` 与 `bots.qq.com` 都会返回同一结果；`api.sgroup.qq.com` 返回 11001「不支持的调用」，不要用它验证。**每次都先验证再改配置，能省掉一轮无意义的重启。**
+
+**坑二：没有 openid 就进不去，而 openid 只在消息通过访问控制后才落盘。**
+`access.c2cMode=allowlist` + 空名单是 fail-closed，消息被拦在会话创建之前，`~/.dsh-qqbot/model-prefs.json` 不会出现，拿不到 openid。绕法有两条：
+
+| 路径 | 代价 | 说明 |
+|---|---|---|
+| 临时 `c2cMode: open` 收一条消息 | 短窗口内不设防 | 机器人未发布时平台侧只放行开发者，实际暴露面极小；拿到 openid 后立刻改回 |
+| 改插件源码把 `logger.debug` 抬到 `warn` | 破坏"原样验证官方包"的前提 | `accessPolicy` 的拦截原因里带 openid（`not in allowlist (<openid>)`），但 `logger.debug` 被宿主默认日志级别（level=1）过滤，改级别才看得见 |
+
+**本轮用的是前者。** 顺带记一条通用观测技巧：插件自己的 info 日志里有一行
+`getOrCreate: key=qqbot:<appId>:<scope>:<peerId>`（`session-manager.js:417` 附近），
+**openid 就在这个键里**——但这一行同样看不到（见 §10.4 日志级别问题），所以最终是从 `model-prefs.json` 的 `sessionIds` 键读出来的。
+
+### 10.2 注入是否真的到达 QQ 会话：可验证，不必猜
+
+会话落盘在 `~/.dsh/sessions/<cwd 转义>/<sessionId>/session.v4.jsonl.zstd`。
+**它是「多段 zstd 帧追加」格式，`zstdDecompressSync` 只解第一帧**（那只有一行 session 头）。
+正确读法是扫描 magic `28 B5 2F FD`，对每个偏移各解一次再拼接：
+
+```js
+const buf = fs.readFileSync(file);
+let out = '';
+for (let i = 0; i <= buf.length - 4; i++)
+  if (buf[i] === 0x28 && buf[i+1] === 0xb5 && buf[i+2] === 0x2f && buf[i+3] === 0xfd)
+    try { out += zlib.zstdDecompressSync(buf.subarray(i)).toString('utf8'); } catch {}
+```
+
+解出来后 `user/message` 事件里能看到该轮**完整装配的 context 块**。实测结果：
+
+- `persona-memory` / `persona-context` / `persona-state` / `persona-self-model` **四个块都在**，内容非空；
+- `persona-memory` 里有 5 条（user_direct × 2、self_correction × 2、self_direct × 1），带来源标注与降权标记；
+- `persona-state` 显示 `acquaintance` 阶段；`persona-self-model` 是 v2 摘要。
+
+**结论：persona 的注入 provider 在 QQ 会话里是生效的，不存在"只对 web 生效"的问题。** 这条值得写下来，因为它是最容易怀疑、又最容易用错误证据（比如去磁盘找 `lastRetrieved`——那是内存软状态，`memory.ts:7` 明确不落盘）判断错的地方。
+
+### 10.3 两个真实缺陷（验收中暴露，未修）
+
+**缺陷 A：记忆送达了，但承诺没有变成行为约束。**
+2026-11-03 有一条 `self_direct` 事件「承诺-的」，内容是"我总是习惯性在结尾抛问题……以后不这样了"，`importance=0.7`、`strength=strong`。
+这条**确实出现在 QQ 第一轮的注入里**（见 §10.2 的实测输出）。但那一轮及随后的回复仍然以「你平时是不是更喜欢移动端？」这类追问收尾。
+
+也就是说：**「记忆 → 注入」这条链路是通的，「注入 → 行为」这条不存在。** 现在没有任何机制把 `strength=strong` 的承诺变成对下一轮表达的约束——一致性门禁只校验 self_model 的新特质，不校验行为；诚实基线（`bypassDecision`）运行时零调用。
+
+这不是插件选型的缺陷，是 M2/M4 的欠账。观察期会持续暴露这类样本，正好用来给动机引擎与一致性门禁定需求。
+
+**缺陷 B：相对日期把"昨天"标成"今天"。**
+`recall.ts:156` 的 `relativeDayLabel` 用**经过的 24 小时整除**：`Math.floor((now - t) / MS_PER_DAY)`。
+11-03 13:14Z 的事件在 11-04 15:03（本地）注入时只过了 17.8 小时 → `floor=0` → 标注为「今天」，于是 prompt 里出现 `2026-11-03（今天）`。
+
+而同一代码库里 `review-cursor.ts:88` 对"今天"用的是**本地零点**，注释还专门写了"UTC 切片的今天在本地 02:00 前后会指向前一天"。同一个词，两套语义。
+
+对人格插件来说这不是排版问题：它会让模型把昨天下午的事当成刚发生的事，影响"这件事还热不热"的判断。
+
+### 10.4 一个观测限制（影响后续排查）
+
+插件的 `logger.info` **在宿主里不落盘**（`console.log` 的那行 `[im-qqbot] Bot ready!` 能看见，`logger.info` 的看不见）。cordis 的日志导出器默认 `level=1`，且没有暴露按名字调级别的配置入口。
+
+所以排查 QQ 相关问题时：**能依赖的只有裸 `console.log` 与落盘状态（`model-prefs.json`、session 文件、persona events）**，不要指望插件日志。本次验收全程用 `>` 重定向启动（`桌面\start-dsh-logged.bat`）才拿到 `console.log`。
+
+### 10.5 验收结果
+
+| # | 验收 | 结果 |
+|---|---|---|
+| 1 | QQ 发消息 → `events` 多一条 `user_direct` | ⚠️ **验收标准本身写错了**（见下） |
+| 2 | 回复带出既有记忆 | ✅ 注入里有 5 条，回复能接上"手机/网页端"话题 |
+| 3 | `/persona` 计数增长、来源分布不跑偏 | ✅ 今日 +2 条 `self_direct`，来源正确 |
+| 4 | web 端与 QQ 端记忆合并不分裂 | ⏸ 未测（web 端本轮未并发使用） |
+| 5 | 次日 02:00 复盘正常 | ⏸ 待明日 |
+| 6 | 被动窗口实测 | ⏸ 待测 |
+| 7 | 群聊确认关闭 | ⏸ 待测 |
+
+**第 1 条的修正**：原标准假设"每条用户消息都会进记忆"，这是错的。`extractCandidate`（`extract.ts:138`）的门槛是
+`(事件词 且 (时间词 或 我))` 或 `(情绪词 且 我)` 或 `(时间词 且 我)`。
+实测用户那三句（"你知道我在用什么和你聊天嘛"、"这是新加的 QQ bot，现在我可以直接用手机…"、"只是这样更加方便"）**全部返回 null**——其中第二句含"我"和"现在"，但 `现在` 不在 `TIME_WORDS` 里（`extract.ts:47`），所以不构成时间信号。
+
+这不是缺陷，是"不把闲聊当经历"的设计取舍。正确的验收口径应该是：**发一条含时间词/事件词/情绪词的消息，才应落一条 `user_direct`**。这条本身也成为后续可讨论的改进点（"现在/这两天"这类词该不该算时间信号）。
+
