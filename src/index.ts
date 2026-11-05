@@ -1070,6 +1070,10 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
     try {
       const turn = buildRawTurn(session, event, { makeId: () => store.makeId() });
       if (!turn) return;
+      if (turn.session_id === '') {
+        // §5.1 红线：session_id 缺失时显式降级为空串，必须记录，禁止静默
+        ctx.logger.warn('[persona-innate] raw_turns session_id 缺失，按空串降级落库（event_id=%s）', turn.event_id);
+      }
       await rawTurnLog.append(turn);
     } catch (err) {
       ctx.logger.warn('[persona-innate] raw_turns 捕获失败：%s', String(err));

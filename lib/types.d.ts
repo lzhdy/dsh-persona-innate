@@ -505,7 +505,7 @@ export type RawSpeaker = 'user' | 'assistant' | 'system' | 'tool';
  * P1 只写不读：不接入任何注入/检索/复盘路径。
  */
 export interface RawTurn {
-    /** 全局稳定 ID，'rt-' 前缀；DSH 消息自带 id 优先，无 id 时退化为 'rt-' + makeId() */
+    /** 全局稳定 ID：DSH 消息自带 id 优先（user 取 data.id / assistant 取 data.message.id）；无 id 时才退化为 'rt-' + makeId() */
     event_id: string;
     /** 会话定位：DSH session id（session.id）；不可得时显式空串 */
     session_id: string;
