@@ -213,6 +213,8 @@ export interface SelfModelSnapshot {
     sourceEventIds: string[];
     /** 本次更新的来源映射 */
     sourceTraces?: Partial<Record<SelfModelSource, string[]>>;
+    /** P2：候选特质（未过 §4.4 晋升门槛，只保留不注入） */
+    candidateTraits?: string[];
 }
 /** 自我模型增量（commit 输入） */
 export interface SelfModelDiff {
@@ -221,6 +223,13 @@ export interface SelfModelDiff {
     speakingStyle?: string;
     relationshipView?: string;
     narrative?: string;
+}
+/** P2：traits 晋升/隔离决策（可审计） */
+export interface PromotionDecision {
+    /** 是否允许这批 traits 晋升为 stable */
+    promote: boolean;
+    /** 可审计的决策理由（无论晋升与否都必须非空） */
+    reason: string;
 }
 /** 人格发展阶段（复盘 step7 判定；M1"性格开始成形"= 进入 shaping） */
 export type PersonaStage = 'seeding' | 'forming' | 'shaping' | 'stable';
@@ -249,6 +258,8 @@ export interface SelfModelServiceLike {
     /** 回滚到指定版本（M1 验收"可回滚"） */
     rollback(version: number): Promise<SelfModelSnapshot | null>;
     appendGrowth(entry: GrowthEntry): Promise<void>;
+    /** P2：把候选特质去重合并进 candidateTraits（不碰 stable traits），版本 +1、旧 current 入 history */
+    commitCandidates(candidates: string[]): Promise<SelfModelSnapshot>;
     /** 注入层摘要（同步纯函数，O21：状态每轮注入、自我模型按需摘要） */
     getInjectionSummary(snapshot?: SelfModelSnapshot | null): string;
 }
@@ -325,6 +336,11 @@ export interface ReviewOutput {
     selfImportance: SelfImportanceEntry[];
     /** v0.6：threads / attributes 派生统计（供 /persona review 展示；降级/skip 时为未执行） */
     memoryFacts: MemoryFactStats;
+    /** P2：本次 traits 晋升/隔离决策 */
+    promotion?: {
+        decision: PromotionDecision;
+        candidateCount: number;
+    };
     cost: {
         /** 核心三步（distillFacts / reflectSelf / updateMirror）的 LLM 调用数——口径不变 */
         llmCalls: number;

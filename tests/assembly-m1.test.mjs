@@ -180,16 +180,17 @@ test('M1 接线：/persona review 复盘后 self_model 版本递增 + 成长档�
   const rev = await cmd.handler({ rawInput: 'review' });
   assert.equal(rev.kind, 'success', rev.text);
   assert.ok(rev.text.includes('复盘完成'), rev.text);
-  assert.ok(rev.text.includes('v2'), `self_model 版本应递增到 v2：${rev.text}`);
+  assert.ok(rev.text.includes('v3'), `self_model 版本应递增（候选隔离 + 稳定提交）：${rev.text}`);
   assert.ok(rev.text.includes('成长档案'), `输出应提成长档案：${rev.text}`);
   assert.ok(rev.text.includes('自源重要性条目'), `输出应提自源重要性：${rev.text}`);
 
-  // 落盘核验
+  // 落盘核验（P2：单日窗口 → traits 默认冻结进 candidateTraits，不进 stable）
   const smFile = JSON.parse(await readFile(join(dataDir, 'self-model.json'), 'utf-8'));
-  assert.equal(smFile.current.version, 2, `self-model.json current 应为 v2：${smFile.current.version}`);
-  assert.ok(smFile.history.length >= 1, 'history 应保留 v1 旧版（可回滚窗口）');
+  assert.equal(smFile.current.version, 3, `self-model.json current 应为 v3：${smFile.current.version}`);
+  assert.ok(smFile.history.length >= 1, 'history 应保留旧版（可回滚窗口）');
   assert.ok(smFile.growthArchive.length >= 1, '成长档案非空');
-  assert.ok(smFile.current.traits.length >= 1, '复盘产出新特质');
+  assert.ok(smFile.current.candidateTraits.length >= 1, '复盘产出候选特质（隔离待验证）');
+  assert.equal(smFile.current.traits.length, 0, '单日窗口下 traits 不晋升 stable');
 
   await fiber.dispose();
 });

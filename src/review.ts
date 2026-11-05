@@ -25,6 +25,7 @@ import type {
 } from './types.js';
 import type { KVStore } from './store.js';
 import { EventLog } from './event-log.js';
+import { decidePromotion } from './promotion.js';
 import {
   MemoryFactStore,
   deriveMemoryFacts,
@@ -51,6 +52,7 @@ export const REVIEW_PROMPTS: { distillFacts: string; reflectSelf: string; update
     '你是反思端模型。从当日事件中提炼语义事实，只输出 JSON，不要输出任何其他内容。',
     '格式：{"facts":[{"type":"user|world|self","content":"事实陈述","sourceEventIds":["事件id"],"confidence":0.5}]}',
     'type=user：关于用户的事实；type=world：关于外部世界的事实；type=self：关于插件自身的事实。',
+    'type=user 的事实只能从 provenance=user_direct 的事件提炼；provenance=self_direct/self_correction/induced 只能提炼为 type=self，不得当作用户事实。',
     '只提炼事件直接支持的事实，不输出行为指令；无事实则输出 {"facts":[]}。',
   ].join('\n'),
   reflectSelf: [
@@ -136,7 +138,9 @@ export class DailyReviewEngine {
 
   /** step2 提炼语义事实（LLM reflect #1；降级复盘也执行）。解析失败 → [] 降级继续 */
   async distillFacts(events: PersonaEvent[]): Promise<PersonaFact[]> {
-    const listing = events.map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`).join('\n');
+    const listing = events
+      .map((e) => `- [${e.id}] (${e.topic}) [provenance:${e.provenance}] ${e.summary}`)
+      .join('\n');
     const raw = await this.deps.llm.complete({
       role: 'reflect',
       prompt: `${REVIEW_PROMPTS.distillFacts}\n\n当日事件：\n${listing || '（无）'}`,
@@ -393,8 +397,33 @@ export class DailyReviewEngine {
     const diff: SelfModelDiff = { ...selfDiff };
     if (relationshipView) diff.relationshipView = relationshipView;
 
+    // P2 晋升闸门：traits 须同时满足「≥1 条 user_direct 来源」且「跨 ≥2 个日期」才允许
+    // 晋升 stable；否则隔离进 candidateTraits（不注入）。preferences / speakingStyle /
+    // narrative / relationshipView 不受此门槛约束，照常 commit。
+    const candidateTraits = diff.traits;
+    if (candidateTraits && candidateTraits.length > 0) {
+      const decision = decidePromotion(candidateTraits, reflectEvents);
+      out.promotion = { decision, candidateCount: candidateTraits.length };
+      if (!decision.promote) delete diff.traits;
+    }
+
     // step5 一致性检查
     const check = this.consistencyCheck(diff, out.facts);
+
+    // P2：promote=false 的候选落 candidateTraits（隔离失败不阻断主流程，stable 字段照常 commit）
+    if (
+      candidateTraits &&
+      candidateTraits.length > 0 &&
+      out.promotion &&
+      !out.promotion.decision.promote
+    ) {
+      try {
+        await this.deps.selfModel.commitCandidates(candidateTraits);
+      } catch (err) {
+        check.ok = false;
+        check.issues.push(`candidate 隔离失败：${(err as Error).message}`);
+      }
+    }
 
     // step6 写入新版本并备份（commitFromSources consistency 抛错 → 捕获，selfModel:null）
     if (this.hasDiffContent(diff)) {

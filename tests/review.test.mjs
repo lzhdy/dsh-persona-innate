@@ -48,6 +48,7 @@ function makeSelfModelStub(seed) {
   return {
     current: seed,
     commits: [],
+    candidateCommits: [],
     growth: [],
     shouldThrow: null,
     async load() {
@@ -74,6 +75,18 @@ function makeSelfModelStub(seed) {
       };
       this.current = snap;
       this.commits.push({ diff, evidence, sources, changeNote, snap });
+      return snap;
+    },
+    async commitCandidates(candidates) {
+      const prev = this.current ?? {};
+      const snap = {
+        ...prev,
+        version: (prev.version ?? 0) + 1,
+        createdAt: new Date().toISOString(),
+        candidateTraits: [...(prev.candidateTraits ?? []), ...candidates],
+      };
+      this.current = snap;
+      this.candidateCommits.push({ candidates, snap });
       return snap;
     },
     async appendGrowth(entry) {
@@ -210,8 +223,22 @@ test('full 流程：facts / 新版本 selfModel / stage=shaping / archive / self
   const selfModel = makeSelfModelStub({ ...seedSnapshot });
   const engine = new DailyReviewEngine({ llm: scriptedLlm(), selfModel, state: makeStateStub(), store });
   const events = [
-    ev({ id: 'ev-share', topic: '用户-分享', summary: '用户说他养了一只叫煤球的黑猫', importance: 0.8 }),
-    ev({ id: 'ev-night', topic: '用户-加班', summary: '用户加班到深夜，情绪低落', importance: 0.7 }),
+    ev({
+      id: 'ev-share',
+      topic: '用户-分享',
+      summary: '用户说他养了一只叫煤球的黑猫',
+      importance: 0.8,
+      provenance: 'user_direct',
+      time: '2026-11-01T10:00:00.000Z',
+    }),
+    ev({
+      id: 'ev-night',
+      topic: '用户-加班',
+      summary: '用户加班到深夜，情绪低落',
+      importance: 0.7,
+      provenance: 'user_direct',
+      time: '2026-11-02T10:00:00.000Z',
+    }),
   ];
   const out = await engine.run({
     date: '2026-11-02',
@@ -225,6 +252,7 @@ test('full 流程：facts / 新版本 selfModel / stage=shaping / archive / self
 
   assert.equal(out.mode, 'full');
   assert.equal(out.cost.llmCalls, 3, 'full 最多 3 次 LLM 调用（distillFacts/reflectSelf/updateMirror）');
+  assert.equal(out.promotion?.decision.promote, true, 'user_direct + 跨 2 日期 → 晋升通过');
 
   // step2 facts
   assert.ok(out.facts.length >= 1, '应提炼出语义事实');

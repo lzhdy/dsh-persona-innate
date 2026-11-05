@@ -25,6 +25,11 @@ export declare class SelfModelService implements SelfModelServiceLike {
     load(): Promise<SelfModelSnapshot | null>;
     listHistory(): Promise<SelfModelSnapshot[]>;
     commitFromSources(diff: SelfModelDiff, evidence: string[], sources: SelfModelSource[], changeNote?: string): Promise<SelfModelSnapshot>;
+    /**
+     * P2：把候选特质去重合并进 candidateTraits（不碰 current.traits）。
+     * 与 commitFromSources 同款版本化规则：版本 +1、旧 current 入 history（按 historyLimit 截断）。
+     */
+    commitCandidates(candidates: string[]): Promise<SelfModelSnapshot>;
     rollback(version: number): Promise<SelfModelSnapshot | null>;
     appendGrowth(entry: GrowthEntry): Promise<void>;
     /**
