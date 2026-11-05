@@ -386,6 +386,8 @@ export interface ReviewOutput {
     memoryFactCalls: number;
     /** 增量1：procedures 派生这一步的 LLM 调用数，单独计（口径同 memoryFactCalls） */
     procedureCalls: number;
+    /** 增量2：综合泛化这一步的 LLM 调用数（单独计，不并入 llmCalls，理由同 memoryFactCalls） */
+    generalizeCalls: number;
   };
 }
 

@@ -45,6 +45,14 @@ export declare const MEMORY_FACT_PROMPT: string;
  * sourceEventIds 存在性校验（无证据整条丢弃）。
  */
 export declare const PROCEDURE_PROMPT: string;
+/**
+ * 增量2 综合泛化 prompt（facts → traits 候选）。
+ *
+ * 与 reflectSelf 互补不重复：reflectSelf 从"当日事件"反思即时表达；
+ * generalize 从"当日语义事实"归纳稳定特质（须 ≥2 证据）。泛化产物与即时特质
+ * 同过 P2 晋升闸门，未过门槛同样隔离进 candidateTraits。
+ */
+export declare const GENERALIZE_PROMPT: string;
 /** 每日复盘引擎：8 步流水线（§10），LLM 输出解析失败时该步降级为空继续，保证 mock 无 key 可跑 */
 export declare class DailyReviewEngine {
     private readonly deps;
@@ -67,6 +75,11 @@ export declare class DailyReviewEngine {
     extractKeyEvents(events: PersonaEvent[]): PersonaEvent[];
     /** step2 提炼语义事实（LLM reflect #1；降级复盘也执行）。解析失败 → [] 降级继续 */
     distillFacts(events: PersonaEvent[]): Promise<PersonaFact[]>;
+    /** step2.5 综合泛化（增量2）：从 type=self 的 facts 归纳稳定特质（≥2 事件证据） */
+    generalize(facts: PersonaFact[]): Promise<{
+        trait: string;
+        sourceEventIds: string[];
+    }[]>;
     /** step3 反思自我（LLM reflect #2）。解析失败 → {} 降级继续 */
     reflectSelf(events: PersonaEvent[], facts: PersonaFact[]): Promise<Partial<SelfModelDiff>>;
     /** step4 更新关系认知·镜中我（LLM reflect #3）。解析失败 → '' 降级继续 */
