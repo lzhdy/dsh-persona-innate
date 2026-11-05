@@ -289,9 +289,11 @@ test('v0.7-B2: 窗口为空 → skipped，且游标文件原样不动', async ()
 test('v0.7-B3: 成功复盘后游标推进到本次开始时刻（不是结束时刻）', async () => {
   const store = await freshStore();
   const cursorStore = new ReviewCursorStore(store);
-  await cursorStore.save({ version: 1, lastReviewAt: isoAt(Date.now() - 30 * HOUR) });
-
   const now = new Date(2026, 10, 4, 2, 0, 0);
+  // 游标基准必须相对硬编码的 now，而非真实墙钟：用 Date.now() 会让测试随日期漂移
+  //（例：跑在 11-05 时 lastReviewAt 会晚于 now，窗口为空，误判 skipped）。
+  await cursorStore.save({ version: 1, lastReviewAt: isoAt(now.getTime() - 30 * HOUR) });
+
   const inWindow = ev('e_new', new Date(2026, 10, 4, 0, 30, 0).toISOString());
 
   let seenStart = null;
