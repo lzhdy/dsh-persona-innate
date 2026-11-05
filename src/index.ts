@@ -21,6 +21,8 @@ import { RawTurnLog } from './raw-turn-log.js';
 import { buildRawTurn } from './raw-turn.js';
 import { PersonaMemory, type AddResult } from './memory.js';
 import { MemoryFactStore } from './memory-facts.js';
+import { resolveIntent } from './intent.js';
+import { assemble } from './assembler.js';
 import { buildInnateProfile, loadInnateProfile } from './innate.js';
 import { provenanceLabel } from './provenance.js';
 import { extractCandidate, extractStyleFeedback, classifyDialogue, dedupKey, isExtractableUserMessage, extractSelfExpression, isExtractableAssistantMessage, sessionInduceRisk } from './extract.js';
@@ -103,6 +105,8 @@ export const Config = z.object({
   sampleRounds: z.number().default(6),
   /** 每轮注入最近记忆条数上限 */
   injectLimit: z.number().default(5),
+  /** P4：切到按意图装配器（true 时注入改用新装配器文本、停 shadow；默认 false 走旧路径 + shadow） */
+  useIntentAssembler: z.boolean().default(false),
   /** 指令性内容剥离开关 */
   stripDirectives: z.boolean().default(true),
   /** 画像采样所用模型名（空则尝试 ctx.agentDefaultModel；模型变化触发重估） */
@@ -562,10 +566,64 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
 
   const refreshInjection = async () => {
     const snap = await selfModel.load();
-    const { text } = await memory.buildInjection(config.injectLimit, snap ?? undefined, {
+    const result = await memory.buildInjection(config.injectLimit, snap ?? undefined, {
       cueText: lastUserMessage,
     });
-    injectedText = text;
+    const oldText = result.text;
+
+    if (config.useIntentAssembler) {
+      // feature flag 开：注入改用新装配器文本，停 shadow。
+      // 新装配器失败时回退旧文本，不阻断热路径。
+      try {
+        const assembled = await assembleInjection(snap);
+        injectedText = assembled.text || oldText;
+      } catch (err) {
+        ctx.logger.error('[persona-innate] P4 装配器失败，回退旧注入：%s', String(err));
+        injectedText = oldText;
+      }
+      return;
+    }
+
+    // 默认（feature flag 关）：旧路径照常注入 + shadow 并行观测，不切读。
+    injectedText = oldText;
+    try {
+      const assembled = await assembleInjection(snap);
+      await appendShadowLine({
+        ts: new Date().toISOString(),
+        intent: assembled.intent,
+        oldItemsCount: result.events.length,
+        newItemsCount: assembled.items.length,
+        newText: assembled.text,
+      });
+    } catch (err) {
+      // shadow 任何异常吞掉记 error，不阻断热路径
+      try {
+        await appendShadowLine({ ts: new Date().toISOString(), error: String(err) });
+      } catch {
+        /* 观测文件写失败也吞掉 */
+      }
+    }
+  };
+
+  /**
+   * P4 shadow 装配：加载各层数据 → 判意图 → 装配（零 LLM）。
+   * 数据加载全在此处，assemble 本身保持纯函数。
+   */
+  const assembleInjection = async (snap: import('./types.js').SelfModelSnapshot | null) => {
+    const hasOpenThread = (await factStore.loadOpenThreads()).size > 0;
+    const intents = resolveIntent(lastUserMessage, hasOpenThread).map((h) => h.intent);
+    const attrLoad = await factStore.loadAttributes();
+    const attributes = attrLoad.ok ? attrLoad.items : [];
+    const events = await memory.loadEvents();
+    const rawTurns = await rawTurnLog.load();
+    const stateSnap = await stateMachine.snapshot();
+    return assemble({ attributes, events, rawTurns, selfModel: snap, state: stateSnap }, intents);
+  };
+
+  /** shadow 观测：追加写一行 JSONL（与 event-log 同款追加语义） */
+  const appendShadowLine = async (line: Record<string, unknown>) => {
+    const date = localDateString(new Date());
+    await store.appendText(`shadow/assembler-${date}.jsonl`, `${JSON.stringify(line)}\n`);
   };
 
   /** 阶段一：每轮刷新对话上下文注入（描述性事实——用户消息长度、回合长度对比、对话类型）。

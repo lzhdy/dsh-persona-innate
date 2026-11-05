@@ -69,6 +69,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     sampleRounds: z<number, number, "defined">;
     /** 每轮注入最近记忆条数上限 */
     injectLimit: z<number, number, "defined">;
+    /** P4：切到按意图装配器（true 时注入改用新装配器文本、停 shadow；默认 false 走旧路径 + shadow） */
+    useIntentAssembler: z<boolean, boolean, "defined">;
     /** 指令性内容剥离开关 */
     stripDirectives: z<boolean, boolean, "defined">;
     /** 画像采样所用模型名（空则尝试 ctx.agentDefaultModel；模型变化触发重估） */
@@ -95,6 +97,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     sampleRounds: z<number, number, "defined">;
     /** 每轮注入最近记忆条数上限 */
     injectLimit: z<number, number, "defined">;
+    /** P4：切到按意图装配器（true 时注入改用新装配器文本、停 shadow；默认 false 走旧路径 + shadow） */
+    useIntentAssembler: z<boolean, boolean, "defined">;
     /** 指令性内容剥离开关 */
     stripDirectives: z<boolean, boolean, "defined">;
     /** 画像采样所用模型名（空则尝试 ctx.agentDefaultModel；模型变化触发重估） */

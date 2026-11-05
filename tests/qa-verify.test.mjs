@@ -957,17 +957,21 @@ test('QA-C6（缺口已修）：thread 的 dueHint 同样过严口径——指�
 });
 
 /* ═══════════════════ 附：装配缺口观察 ═══════════════════ */
-test('QA-OBS（装配缺口观察）：attributes 目前只在 /persona threads 命令里出现，无注入消费者', async () => {
+test('QA-OBS（装配缺口·已接 P4 shadow）：attributes 有注入消费者（shadow 读 active），但注入仍走旧路径不切读', async () => {
   const src = await readFile(join(REPO, 'src', 'index.ts'), 'utf-8');
   const usages = src.split('\n').filter((l) => l.includes('loadAttributes('));
-  assert.equal(usages.length, 1, `loadAttributes 只应在 /persona threads 命令里被调用一次，实际 ${usages.length} 处`);
-  assert.ok(usages[0].includes('const a = await factStore.loadAttributes()'), usages[0]);
+  // P4 shadow 装配器（assembleInjection）读 active attributes 用于按意图装配；
+  // /persona threads 命令读它用于展示。两者都是只读消费者，写路径零改动。
+  assert.equal(usages.length, 2, `loadAttributes 应在 shadow 装配器与 /persona threads 命令各读一次，实际 ${usages.length} 处`);
+  assert.ok(usages.some((l) => l.includes('const attrLoad = await factStore.loadAttributes()')), 'shadow 装配器读取 active attributes');
+  assert.ok(usages.some((l) => l.includes('const a = await factStore.loadAttributes()')), '/persona threads 命令读取');
 
-  // 注入侧只有 open thread 的"事件 id"参与装配（openThreadsSource），没有任何 attribute 文本
+  // 注入侧旧装配仍只有 open thread 的"事件 id"参与（openThreadsSource）
   assert.ok(src.includes('openThreadsSource: factStore'), '未结槽接线存在');
+  // shadow 不切读：注入缓存仍由旧 buildInjection 产出，attribute 文本不进 injectedText
   assert.ok(!/injected\w*Text\s*=.*attribute/i.test(src), '注入缓存里不应有 attribute 文本');
 
-  // 行为侧：落一条 active attribute，注入文本里不会出现它
+  // 行为侧：落一条 active attribute，旧注入文本里不会出现它（shadow 只写观测文件，不切读）
   const store = await freshStore();
   const facts = new MemoryFactStore(store);
   await facts.saveAttributes([
@@ -985,5 +989,5 @@ test('QA-OBS（装配缺口观察）：attributes 目前只在 /persona threads 
   const mem = new PersonaMemory(store, { stripDirectives: true, injectLimit: 5 });
   await mem.saveEvents([ev('ev_qa_x', new Date().toISOString(), { summary: '用户说换了工作' })]);
   const { text } = await mem.buildInjection(5);
-  assert.ok(!text.includes('上海某游戏公司'), `attributes 目前不进注入，实际文本：${text}`);
+  assert.ok(!text.includes('上海某游戏公司'), `旧注入文本不含 attribute（shadow 不切读），实际文本：${text}`);
 });
