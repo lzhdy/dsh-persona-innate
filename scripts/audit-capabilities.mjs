@@ -25,6 +25,8 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const SRC = join(ROOT, 'src');
+const SCRIPTS = join(ROOT, 'scripts');
+const PKG = join(ROOT, 'package.json');
 const LEDGER = join(ROOT, 'docs', 'capability-ledger.md');
 
 /**
@@ -333,6 +335,73 @@ const ITEMS = [
     witnesses: [{ label: 'localApp', pattern: 'localApp|本地应用', definedIn: '__none__', expectIn: [] }],
     note: '',
   },
+
+  // ── 记忆架构 v1.1 施工单元（2026-11-05） ──────────────────────
+  {
+    id: 'P1-raw-turns',
+    name: 'raw_turns 原始层（每轮先落盘，append-only）',
+    milestone: 'P1',
+    status: 'done',
+    witnesses: [
+      { label: 'rawTurnLog.append', pattern: 'rawTurnLog\\.append\\(', definedIn: 'raw-turn-log.ts', expectIn: ['index.ts'] },
+    ],
+    note: '唯一原始事实源；events 双写保留，读路径留给 P4',
+  },
+  {
+    id: 'INC1-procedures',
+    name: 'procedures 程序性记忆层（只能长出来，不写进去）',
+    milestone: '增量1',
+    status: 'done',
+    mode: 'all',
+    witnesses: [
+      { label: 'saveProcedures', pattern: 'saveProcedures\\(', definedIn: 'procedures.ts', expectIn: ['review.ts'] },
+      { label: 'decideProcedurePromotion', pattern: 'decideProcedurePromotion\\(', definedIn: 'procedure-promotion.ts', expectIn: ['review.ts'] },
+    ],
+    note: '复用 facts 机制；epistemicType=ai_inference、默认 candidate，晋升过闸门',
+  },
+  {
+    id: 'INC2-generalize',
+    name: '综合泛化（复盘从 facts 归纳特质，≥2 证据）',
+    milestone: '增量2',
+    status: 'done',
+    witnesses: [
+      { label: 'this.generalize', pattern: 'this\\.generalize\\(', definedIn: 'review.ts', expectIn: ['review.ts'], symbol: 'generalize' },
+    ],
+    note: '泛化产物并入 candidateTraits，与即时特质同过晋升闸门；边界A已兜底',
+  },
+  {
+    id: 'P4-assembler',
+    name: '按意图装配器（intent + assembler）',
+    milestone: 'P4',
+    status: 'partial',
+    witnesses: [
+      { label: 'resolveIntent', pattern: 'resolveIntent\\(', definedIn: 'intent.ts', expectIn: ['index.ts'] },
+      { label: 'assemble', pattern: 'assemble\\(\\{', definedIn: 'assembler.ts', expectIn: ['index.ts'], symbol: 'assemble' },
+    ],
+    note: 'shadow 落地，注入仍走旧 buildInjection；flag 默认 false，切读须 shadow ≥14天/≥30轮且 13 项指标达标',
+  },
+  {
+    id: 'INC4-salience',
+    name: 'salience 第二职责（巩固降采样 + 检索预算）',
+    milestone: '增量4',
+    status: 'done',
+    witnesses: [
+      { label: 'sampleBySalience', pattern: 'sampleBySalience\\(', definedIn: 'recall.ts', expectIn: ['review.ts'] },
+    ],
+    note: '红线：不触碰 status/confidence/有效期；冷热分层延后',
+  },
+  {
+    id: 'INC5-goldset',
+    name: '评测资产化（goldset + 跑分脚本）',
+    milestone: '增量5',
+    status: 'done',
+    mode: 'all',
+    witnesses: [
+      { label: 'npm script eval:goldset', pattern: 'eval:goldset', definedIn: '__none__', expectIn: ['package.json'], inString: true },
+      { label: 'readFileSync（读取 goldset 标注）', pattern: 'readFileSync\\(', definedIn: '__none__', expectIn: ['scripts/eval-goldset.mjs'], symbol: 'readFileSync' },
+    ],
+    note: 'goldset/public 七切片 + hidden 隐藏集；准确性指标空跑为 null，不填预估值',
+  },
 ];
 
 /* ── 执行 ─────────────────────────────────────────────────── */
@@ -438,6 +507,29 @@ async function loadSources() {
   return { raw, bare };
 }
 
+/**
+ * 额外扫描面：`package.json`（npm 脚本接线）与 `scripts/*.mjs`（评测资产等工具）。
+ *
+ * 为什么需要：增量5 的 goldset 是脚本资产，不是 `src` 模块。witness 只扫 `src/*.ts`
+ * 就永远看不见它，台账会漏掉"脚本写了但没人挂上"这类缺陷。这里用独立 key
+ * （`package.json` / `scripts/x.mjs`）并进同一张表，让"脚本存在且被 npm script 挂上"
+ * 也变成可执行断言。
+ */
+async function loadExtras() {
+  const raw = new Map();
+  const bare = new Map();
+  const add = (key, text) => {
+    raw.set(key, text);
+    bare.set(key, stripCommentsAndStrings(text));
+  };
+  add('package.json', await readFile(PKG, 'utf-8'));
+  for (const e of await readdir(SCRIPTS, { withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith('.mjs')) continue;
+    add(`scripts/${e.name}`, await readFile(join(SCRIPTS, e.name), 'utf-8'));
+  }
+  return { raw, bare };
+}
+
 /** 纯声明行：import / 类型导出 / interface / type 别名 / declare —— 这些不是"被调用" */
 const DECL_ONLY =
   /^\s*(import\b|export\s+type\b|export\s*\{[^}]*\}\s*from\b|export\s*\{|interface\b|type\s+\w+\s*=|declare\b)/;
@@ -489,6 +581,9 @@ function checkWitness(w, sources, rawSources) {
 }
 
 const { raw: rawSources, bare: sources } = await loadSources();
+const extras = await loadExtras();
+for (const [k, v] of extras.raw) rawSources.set(k, v);
+for (const [k, v] of extras.bare) sources.set(k, v);
 const results = ITEMS.map((item) => {
   const witnessResults = item.witnesses.map((w) => ({ w, hits: checkWitness(w, sources, rawSources) }));
   // mode:'all' 用于"多路都必须接线"的能力（例如状态机要同时接 decay 和 snapshot）
@@ -533,7 +628,7 @@ if (process.argv.includes('--write')) {
   lines.push('');
   lines.push('## 为什么要有这个台账');
   lines.push('');
-  lines.push('这个项目两次栽在同一类缺陷上：机制写好了、测试全绿，但**没有任何调用点**。');
+  lines.push('这个项目三次栽在同一类缺陷上：机制写好了、测试全绿，但**没有任何调用点**。');
   lines.push('');
   lines.push('- `retentionPriority()` 实现了，零调用 → 遗忘机制从未生效；');
   lines.push('- `initiation` 字段、落盘、O17 降级复盘全都写了，三个 `addEvent` 调用点无一传入 → 责任归因永远靠启发式；');

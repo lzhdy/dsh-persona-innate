@@ -1,6 +1,6 @@
 # 问题记录清单（Issue Register）
 
-**版本**：v1.0 · 日期：2026-11-05
+**版本**：v1.1 · 日期：2026-11-05
 **配套文档**：`README.md`（使用说明）、`docs/mechanism-design.md`（唯一总设计文档 v1.0.0）、`docs/capability-ledger.md`（`npm run audit --write` 自动生成的能力台账）
 
 ---
@@ -130,7 +130,7 @@
 | ISS-018 | 输出结构层后处理未实现 | P3 | `open` | 当前只做感知–复盘 |
 | ISS-019 | 评测场景集自建（TODO 对接 XSTest / OR-Bench） | P2 | `open` | 漂移审计场景集与伪有害集为初始自建；goldset 已资产化（增量5），公开基准对接未做 |
 | ISS-020 | P5 索引 / P6 图实验待施工 | P2 | `deferred` | 依赖评测证据积累（shadow 观察 + goldset 达标） |
-| ISS-021 | 能力台账未随 P1–P4 施工更新 | P2 | `open` | 台账仍是施工前 29 项口径（已实现 10 / 半接 9 / 零实现 10）；`raw_turns` / `procedures` / `assembler` 新层未入 `ITEMS` |
+| ISS-021 | 能力台账未随 P1–P4 施工更新 | P2 | `fixed` | 已补 6 条入 `ITEMS`（P1 raw_turns / 增量1 procedures / 增量2 综合泛化 / P4 装配器 / 增量4 salience / 增量5 goldset），并给审计脚本新增 `scripts/*.mjs` 与 `package.json` 扫描面；台账 29→35 项（已实现 15 · 半接 10 · 零实现 10），`npm run audit` 通过 |
 
 ---
 
@@ -240,12 +240,12 @@
 
 | 状态 | 数量 |
 |---|---|
-| `open` | 17 |
+| `open` | 16 |
 | `observing` | 4 |
 | `partial` | 3 |
 | `deferred` | 3 |
 | `wontfix` | 3 |
-| `fixed` | 11 |
+| `fixed` | 12 |
 | `invalid` | 4 |
 | **合计** | **45**（41 条有效 + 4 条误诊留档） |
 
@@ -262,3 +262,4 @@
 | 日期 | 版本 | 变更 |
 |---|---|---|
 | 2026-11-05 | v1.0 | 首版。汇总观察期（11-04 至 11-05）与记忆架构 v1.1 施工期间的全部已知问题：41 条有效条目 + 4 条误诊留档 |
+| 2026-11-05 | v1.1 | ISS-021 关闭：能力台账补 6 条施工单元（29→35 项），审计脚本新增 `scripts/*.mjs` 与 `package.json` 扫描面 |
