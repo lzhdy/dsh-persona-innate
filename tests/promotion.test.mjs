@@ -138,6 +138,24 @@ test('decidePromotion：user_direct + 跨 2 日期 → true', () => {
   assert.ok(d.reason.length > 0, '晋升时 reason 也非空');
 });
 
+test('decidePromotion：malformed 事件（time 缺失/非字符串）不抛错，按不计入跨日期处理', () => {
+  const events = [
+    evt({ id: 'u1', provenance: 'user_direct', time: '2026-11-01T09:00:00.000Z' }),
+    evt({ id: 'bad1', provenance: 'user_direct', time: undefined }),
+    evt({ id: 'bad2', provenance: 'user_direct', time: 12345 }),
+  ];
+  const d = decidePromotion(['在意被记住'], events);
+  assert.equal(d.promote, false, '有效日期去重后仅 1 个 → 默认冻结');
+  assert.match(d.reason, /日期/);
+});
+
+test('decidePromotion：纯空白 / 非字符串候选视为无候选 → false', () => {
+  const events = [evt({ id: 'u1', provenance: 'user_direct', time: '2026-11-01T09:00:00.000Z' })];
+  const d = decidePromotion(['   ', '  \t'], events);
+  assert.equal(d.promote, false);
+  assert.match(d.reason, /无候选特质/);
+});
+
 /* ── 2. commitCandidates 单测 ── */
 
 test('commitCandidates：去重合并、不碰 traits、版本 +1、history 保留', async () => {

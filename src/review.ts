@@ -14,6 +14,7 @@ import type {
   PersonaEvent,
   PersonaFact,
   PersonaStage,
+  PromotionDecision,
   ReviewInput,
   ReviewOutput,
   SelfImportanceEntry,
@@ -170,7 +171,10 @@ export class DailyReviewEngine {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}; // 解析失败 → 降级为空
     const diff: Partial<SelfModelDiff> = {};
     if (Array.isArray(parsed.traits)) {
-      diff.traits = parsed.traits.filter((t: unknown): t is string => typeof t === 'string' && !!t);
+      diff.traits = parsed.traits
+        .filter((t: unknown): t is string => typeof t === 'string' && !!t)
+        .map((t: string) => t.trim())
+        .filter((t: string) => t.length > 0);
     }
     if (Array.isArray(parsed.preferences)) {
       diff.preferences = parsed.preferences.filter((p: unknown): p is string => typeof p === 'string' && !!p);
@@ -402,7 +406,17 @@ export class DailyReviewEngine {
     // narrative / relationshipView 不受此门槛约束，照常 commit。
     const candidateTraits = diff.traits;
     if (candidateTraits && candidateTraits.length > 0) {
-      const decision = decidePromotion(candidateTraits, reflectEvents);
+      // decidePromotion 理论上是纯函数，但仍做防御：一旦抛错，降级为「不晋升」
+      // （保守：宁可隔离不晋升），错误信息记进 out.promotion.reason，不炸掉整次复盘。
+      let decision: PromotionDecision;
+      try {
+        decision = decidePromotion(candidateTraits, reflectEvents);
+      } catch (err) {
+        decision = {
+          promote: false,
+          reason: `晋升判定异常，默认隔离：${(err as Error).message}`,
+        };
+      }
       out.promotion = { decision, candidateCount: candidateTraits.length };
       if (!decision.promote) delete diff.traits;
     }

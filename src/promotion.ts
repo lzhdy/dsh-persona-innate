@@ -24,7 +24,11 @@ export function decidePromotion(
   candidateTraits: readonly string[],
   reflectEvents: readonly PersonaEvent[],
 ): PromotionDecision {
-  if (!candidateTraits || candidateTraits.length === 0) {
+  // 防御：剔除空串 / 纯空白 / 非字符串条目后仍无有效候选 → 视为无候选。
+  const effective = (candidateTraits ?? []).filter(
+    (t) => typeof t === 'string' && t.trim().length > 0,
+  );
+  if (effective.length === 0) {
     return { promote: false, reason: '无候选特质' };
   }
 
@@ -33,7 +37,10 @@ export function decidePromotion(
     return { promote: false, reason: '缺少非 AI 独白来源（需 ≥1 条 provenance=user_direct 的事件）' };
   }
 
-  const dates = new Set(reflectEvents.map((e) => e.time.slice(0, 10)));
+  // malformed 事件（time 缺失/非字符串）不计入跨日期统计：只统计能确定日期的事件。
+  const dates = new Set(
+    reflectEvents.filter((e) => typeof e.time === 'string').map((e) => e.time.slice(0, 10)),
+  );
   const crossDate = dates.size >= 2;
   if (!crossDate) {
     return { promote: false, reason: '仅跨单个日期（需 ≥2 个不同日期的事件）' };
