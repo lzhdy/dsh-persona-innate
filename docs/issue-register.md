@@ -184,7 +184,7 @@
   3. **加载证据**：重启后 `~/.dsh/persona-innate/shadow/assembler-2026-11-05.jsonl` 由插件自己写出——0.5.4 根本没有 assembler 模块，这个文件不可能由旧版本产生。首行 `intent=["continue_task"]`、`oldItemsCount=5`、`newItemsCount=8`，说明装配器在真实数据上跑通，不是空跑。
   4. **红线守住**：`useIntentAssembler` 默认 false，且全仓只在 `index.ts:574` 一处分支——注入仍走旧 `buildInjection`，装配器只写观测文件，没有提前切读（ISS-006 的观察期不被这次部署污染）。
 - **回滚路径**：数据快照 `~/.dsh/_backups/persona-innate-20261105-180416`（18 文件 / 136K）；代码快照 `~/.dsh/_backups/pkg-0.5.4-20261105-180420`。回滚 = 停进程 → 覆盖 `node_modules` 包目录 → 覆盖数据目录。
-- **遗留待验**（本条闭环后仍需盯）：`raw-turns/` 目录、`memory/procedures.json` 都只在**真实话轮 / 凌晨复盘**时才落盘，部署当时尚未产生；`shadow/` 已证明装配器可用，但这两项要等第一次真实使用后才能确认。
+- **遗留待验**（本条闭环后仍需盯）：`raw-turns/` 已证实——部署后第一个真实话轮起就在落盘，至 2026-11-05 20:1x 已有 **48 条**（`raw-turns/2026-11.jsonl`，字段含 `speaker` / `raw_text` / `asserted_at` / `content_hash`），P1 原始层在生产环境成立。`memory/procedures.json` 只在**凌晨复盘**长出候选时才会出现，尚未产生，属正常时序。
 
 ### ISS-028 `dsh-qqbot` 升级会冲掉 `node_modules` 本地补丁
 

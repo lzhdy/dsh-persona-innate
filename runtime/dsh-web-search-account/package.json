@@ -1,0 +1,15 @@
+{
+  "name": "dsh-web-search-account",
+  "version": "0.1.0",
+  "private": true,
+  "description": "让 dsh 的 web_search 用 DeepSeek 账号登录态鉴权，而不是要求 DEEPSEEK_API_KEY（本机跑本地模型时的必要补丁）",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-web-search-deepseek": "^0.2.1-rc.5"
+  },
+  "license": "MIT"
+}
