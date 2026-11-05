@@ -19,7 +19,7 @@
  */
 
 import { DeepSeekSearchProvider } from '@deepseek-ai/dsh-web-search-deepseek';
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -52,6 +52,36 @@ const note = async (record) => {
   } catch {
     /* 观测失败不影响搜索本身 */
   }
+};
+
+/** 本地日期（YYYY-MM-DD），用于「启动自检每天最多一次」的判定。 */
+const localDate = (at = new Date()) => {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+};
+
+/**
+ * 读观测日志，取最后一次**真正发起过**启动自检的本地日期（`boot-search` / `boot-search-failed`）。
+ * 跳过 `boot-search-skipped`，否则跳过记录会把「今天已跑过」永久续期。无日志返回 null。
+ */
+const lastBootSearchDate = async () => {
+  try {
+    const text = await readFile(LOG_FILE, 'utf8');
+    const lines = text.trimEnd().split('\n');
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (!lines[i].includes('"boot-search')) continue;
+      try {
+        const parsed = JSON.parse(lines[i]);
+        if (parsed.event !== 'boot-search' && parsed.event !== 'boot-search-failed') continue;
+        if (typeof parsed.ts === 'string') return localDate(new Date(parsed.ts));
+      } catch {
+        /* 坏行跳过 */
+      }
+    }
+  } catch {
+    /* 无日志等同没跑过 */
+  }
+  return null;
 };
 
 export function apply(ctx, config = {}) {
@@ -96,6 +126,24 @@ export function apply(ctx, config = {}) {
   // 官方类的 id 是固定字段（'deepseek-official'），注册前改成自己的 id，
   // 否则缝合层会以 WEB_DUPLICATE_PROVIDER 拒绝。
   provider.id = PROVIDER_ID;
+
+  /**
+   * 兼容 seam 的接口演进：上游 0.2.2 起把「这条路由上的搜索有没有可发的凭据」抽成
+   * provider 的 `ready()`，没有凭据时干脆不把工具暴露给模型，而不是让它现场报错。
+   * 这里对齐官方 `searchConfigured()` 的语义，但账号服务尚未注册时返回 true（乐观）——
+   * 启动早期误判为 false 会让工具整个会话都不可用，代价比"调用时才发现没凭据"更大。
+   */
+  provider.ready = async () => {
+    try {
+      const account = ctx.get('deepseekAccount');
+      if (account === undefined) return true;
+      const token = await accountToken(`${baseURL}/messages`);
+      if (token !== undefined) return true;
+      return (await configuredApiKey()) !== undefined;
+    } catch {
+      return false;
+    }
+  };
 
   // 注册失败（例如 id 冲突）会抛 WEB_DUPLICATE_PROVIDER，整段 apply 中止——
   // 因此下面那行 registered 日志的「存在」本身就证明注册成功。
@@ -148,20 +196,27 @@ export function apply(ctx, config = {}) {
         );
 
         // 启动真搜一次：这是「搜索能力当前是否可用」的唯一硬证据。
-        // 关闭方式：config.bootSelfTest = false（不想每次启动都花一次搜索额度时）。
+        // 但**每天最多一次**——搜索走账号额度，重启不应反复消耗。
+        // 关闭方式：config.bootSelfTest = false。
         if (ok && config.bootSelfTest !== false) {
-          const startedAt = Date.now();
-          try {
-            const result = await provider.search({ query: 'deepseek harness', maxResults: 3 });
-            await note({ event: 'boot-search', provider: PROVIDER_ID, sources: result.sources.length, ms: Date.now() - startedAt });
-          } catch (error) {
-            await note({
-              event: 'boot-search-failed',
-              provider: PROVIDER_ID,
-              code: error?.code ?? null,
-              message: String(error?.message ?? error).slice(0, 200),
-              ms: Date.now() - startedAt,
-            });
+          const today = localDate();
+          const lastDay = await lastBootSearchDate();
+          if (lastDay === today) {
+            await note({ event: 'boot-search-skipped', reason: 'already-ran-today', date: today });
+          } else {
+            const startedAt = Date.now();
+            try {
+              const result = await provider.search({ query: 'deepseek harness', maxResults: 3 });
+              await note({ event: 'boot-search', provider: PROVIDER_ID, sources: result.sources.length, ms: Date.now() - startedAt });
+            } catch (error) {
+              await note({
+                event: 'boot-search-failed',
+                provider: PROVIDER_ID,
+                code: error?.code ?? null,
+                message: String(error?.message ?? error).slice(0, 200),
+                ms: Date.now() - startedAt,
+              });
+            }
           }
         }
       } catch (error) {
