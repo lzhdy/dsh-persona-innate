@@ -512,7 +512,7 @@ export function extractSelfExpression(
  * 跳过 reasoning / tool_call / thinking 等非表达块——与 import-chat 的 assistantMessageText 同口径。
  * 未来格式在尾部加入工具调用也不会把工具调用当成 AI 的表达。
  */
-function assistantTextFromBlocks(
+export function assistantTextFromBlocks(
   blocks: readonly { type?: string; text?: string }[] | undefined,
 ): string | null {
   if (!Array.isArray(blocks)) return null;

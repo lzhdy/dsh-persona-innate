@@ -554,3 +554,32 @@ export interface MemoryFactStats {
   /** 未能完成的原因（读盘失败 / 解析失败 / 写盘失败），供 /persona review 展示 */
   error?: string;
 }
+
+/* ══════════════════════ P1 raw_turns 原始层 ══════════════════════ */
+/* 机制依据：《记忆架构最终设计 v1.0》§4.1 数据模型 + §10 迁移计划 P1 行。 */
+
+/** 谁在说（raw_turns 四类 speaker；其余事件类型静默跳过） */
+export type RawSpeaker = 'user' | 'assistant' | 'system' | 'tool';
+
+/**
+ * 一条原始话轮（append-only，回答"谁在何时说过什么"）。
+ * P1 只写不读：不接入任何注入/检索/复盘路径。
+ */
+export interface RawTurn {
+  /** 全局稳定 ID，'rt-' 前缀；DSH 消息自带 id 优先，无 id 时退化为 'rt-' + makeId() */
+  event_id: string;
+  /** 会话定位：DSH session id（session.id）；不可得时显式空串 */
+  session_id: string;
+  /** 轮次定位：turn 号（P1 不可得，显式空串而非伪造） */
+  turn_id: string;
+  /** 谁在说 */
+  speaker: RawSpeaker;
+  /** 原话全文（不用摘要替代）；工具载荷另列于 raw_text */
+  raw_text: string;
+  /** 话语实际发出时间（ISO，来自 event.time 毫秒时间戳） */
+  asserted_at: string;
+  /** 系统获知并写入时间（ISO） */
+  ingested_at: string;
+  /** 内容哈希（sha256 raw_text，hex），谱系定位用；非真实性证明 */
+  content_hash: string;
+}

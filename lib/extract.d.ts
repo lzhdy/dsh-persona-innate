@@ -82,6 +82,15 @@ export declare function sessionInduceRisk(recentUserMessages: readonly string[])
 /** 从一条 assistant 消息文本中提取"AI 自身表达"候选（M3 / M3-2） */
 export declare function extractSelfExpression(text: string, recentUserMessages?: readonly string[]): SelfExpressionCandidate | null;
 /**
+ * 从 assistant content 块数组【从后往前】取最后一条 type==='text'（或 type undefined）的文本，
+ * 跳过 reasoning / tool_call / thinking 等非表达块——与 import-chat 的 assistantMessageText 同口径。
+ * 未来格式在尾部加入工具调用也不会把工具调用当成 AI 的表达。
+ */
+export declare function assistantTextFromBlocks(blocks: readonly {
+    type?: string;
+    text?: string;
+}[] | undefined): string | null;
+/**
  * 判定一条 session/event 是否为可提取的真实 assistant 消息（M3；P0 修正事件路径）。
  * 真实 DSH 事件的表达内容在 data.message.content，兼容旧/直挂结构 data.content。
  */
