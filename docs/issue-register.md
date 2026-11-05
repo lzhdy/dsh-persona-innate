@@ -138,6 +138,7 @@
 | ISS-042 | 浏览 / 搜索经历不回注记忆（`tool_output` 零写入方） | P1 | `open` | `provenance.ts` 有 `tool_output` 权重（可信度 0.4、显著性 0.15）、`recall.ts` 有槽位、`memory-facts.ts` 有分支，但**没有任何代码把 `tool/result` 写成事件**——她搜到的内容只在当轮上下文，下一轮就没了。身体（M4）要的「浏览回注记忆」缺的正是这一层。另：口袋视图从实时工具注册表算，工具注册即算「有」，凭据缺失也会显示存在（2026-11-05 web_search 事故即此类），身体插件须自带可用性自检 |
 | ISS-043 | 「上网」按模型 token 扣额度（官方 `web_search` 的固有成本） | P1 | `fixed` | 用户质疑「又不是调大模型」。**实测确认它确实是模型调用**：请求体 `messages` + `model: deepseek-v4-flash` + `tools:[{type:web_search_20250305}]`，`usage.input_tokens 9804 / output_tokens 867`，10 条结果、4.7s——9804 个输入 token 主要是搜回的网页正文，符合形态而非插件开销。**处置分两步**：① 先在 `runtime/dsh-web-search-account` 加免模型通道（`free-search.js` 抓 `cn.bing.com/search` 解析 `li.b_algo`，150–330ms、0 token），`mode` 默认 `free-first`；② 2026-11-05 20:5x 装第三方 `@fffangchenghao/dsh-web-search@0.24.2` 并把 `searchProvider` 切到它的 `bing`（八引擎 + RRF + 官方源加权 + 系统代理，同样免 key、零 token），本插件降为回滚路径。**线上证据**：宿主内 `POST /api/dsh-web-search/engine-test` 返回 `{engine:"cn.bing", ok:true, latencyMs:298, count:1}`；隔离环境两次真实查询 1471ms / 1990ms 各 5 条，第二个查询直接给出 deepseek-harness 官方仓库与官方文档（单引擎版返回的是 SEO 站）。**遗留**：该包自带 1 个 agent skill（工具用法指南）处于待批准状态，未批准——批准等于往她的指令层再加一份文本，待用户定；它的 `/api/dsh-web-search/update` 端点是设置页一键升级，会跑 pnpm 并清掉手工放的包（重跑 `deploy.mjs` 即恢复）；`toolSurface` 默认 `unified`，工具面只多一个 `web_tools`（8 个 action），不是 8 个独立工具 |
 | ISS-044 | 她翻不出口袋里工具的**取值**（`enum`）：`web_tools` 的 8 个 action 她说"不好意思" | P1 | `open` | **实测**（2026-11-05 21:08，QQ）：用户按"让她自己翻参数"的路线提示「你自己把 action 参数那几个可选的值看一看」，她回「好的，让我看看 web_tools 的 action 参数有哪些选项：」，追问后只答「不好意思」——翻不出来。**机制层事实**：口袋视图详情模式只投影两样东西——参数名（`paramNames`）与描述第一行截断 48 字（`firstLine`，`DEFAULT_SUMMARY_MAX=48`）；`enum` 取值不投影。`src/pocket.ts` 的 `renderPocket` 拼的是 `- name(params) summary`，所以她看到的是 `web_tools(action,queries,query,…) One entry point for advanced web work. Set acti…`：知道有个 `action` 开关，不知道有哪几档。**未排除的另一半**：完整 JSON Schema（含 `action` 的 enum）本来每次请求就在她的工具定义里，理论上她读得到，所以这次失败也可能不是投影薄而是她没去读/读了没落到回答里——要区分得看那一轮 raw-turns 与工具调用记录，当前无证据，不臆断。**处置方向（用户 2026-11-05 21:13 定：先记，后改）**：详情模式遇到带 `enum` 的参数就列取值（`action: search_many\|advanced_search\|…`），数据全部来自真实 schema，不新增任何描述文本。**为什么值得修**：自省投影比真实能力薄，等于让她对自己的能力有系统性误判，违反"诚实基线"（理念 5）；同时这是"能力感知走第一人称自省、不走第二人称注入"这条路线**第一次实测失败**，修它比批 skill（往指令层加文本）更符合理念 |
+| ISS-045 | 自动上下文压缩**从未生效**：`headroomTokens` 默认 64k 比她的窗口 32k 还大 | P1 | `open` | 用户问「她不能像你一样自动压缩上下文吗，每次都得手动 /new」。**机制存在**：`preset-standard` 内含 `compaction-basic` + `command-compact`（dump-config 658–821 行），`auto` 默认 `true`，`thresholdRatio` 默认 0.8。**但从没跑起来**：`headroomTokens` 默认 65536（`dsh-compaction-basic/lib/index.js:63`），她的 `contextWindow` 只有 32768（llama-local / `qwen3.6-35b-a3b`，dump:91）→ 压力预算 = 32768 − reservedCompletionTokens − 65536 < 0 → `resolveCompactSpec` 抛 `TargetPressureConfigError`（:131）→ 被 catch 后只 `logger.warn('step compaction failed …; continuing the turn')`，同一 target 只警告一次（:844-849）→ 每轮都"继续这一轮、不压缩"。所以用户只剩 `/new` 一条路；QQ 通道也没有斜杠命令入口（`/compact` 只在 web/CLI）。**间接后果**：她的记忆注入每轮占一大块前缀，32k 里留给对话的预算更小，退化更快。**修法（待确认，未动）**：给 `compaction-basic` 显式配 `headroomTokens`（4096–8192，须满足 `contextWindow − maxTokens − headroom > 0`）并按需调 `thresholdRatio`；或把 adapter 的 `contextWindow` 报到模型真实能力。建议先只改 headroom，观察压缩是否真的触发并能产出可用摘要，再决定是否动窗口 |
 
 ---
 
@@ -253,14 +254,14 @@
 
 | 状态 | 数量 |
 |---|---|
-| `open` | 17 |
+| `open` | 18 |
 | `observing` | 4 |
 | `partial` | 3 |
 | `deferred` | 3 |
 | `wontfix` | 3 |
 | `fixed` | 14 |
 | `invalid` | 4 |
-| **合计** | **48**（44 条有效 + 4 条误诊留档） |
+| **合计** | **49**（45 条有效 + 4 条误诊留档） |
 
 **按这个清单，接下来最该做的三件事（顺序）**
 
@@ -280,3 +281,4 @@
 | 2026-11-05 | v1.3 | 新增 ISS-042（`tool_output` 零写入方，浏览经历不进记忆）；ISS-015 补范围确认「身体包含浏览网页」。统计 `open` 15→16、合计 45→46 |
 | 2026-11-05 | v1.4 | 新增 ISS-043（官方 `web_search` 按 token 扣额度 → 已改默认免模型通道），附第三方插件调研结论待拍板；症状索引修正一处条号误引（ISS-042→ISS-027）。统计 `fixed` 13→14、合计 46→47 |
 | 2026-11-05 | v1.5 | 新增 ISS-044（她翻不出口袋里工具的 `enum` 取值：`web_tools` 的 8 个 action 她说"不好意思"）。"第一人称自省"路线第一次实测失败；用户定"先记后改"，只入清单不动代码。统计 `open` 16→17、合计 47→48 |
+| 2026-11-05 | v1.6 | 新增 ISS-045（自动压缩从未生效：`headroomTokens` 默认 64k 大于她 32k 的窗口，压力预算为负 → 每轮"继续、不压缩"）。这是"每次只能 `/new`"的机制层根因，不是模型能力问题。统计 `open` 17→18、合计 48→49 |
