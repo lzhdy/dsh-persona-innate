@@ -14,11 +14,13 @@
 import { createHash } from 'node:crypto';
 import type {
   AttributesFile,
+  EpistemicType,
   FactDropReason,
   MemoryFactStats,
   PersonaAttribute,
   PersonaEvent,
   PersonaThread,
+  Provenance,
   ThreadStatus,
   ThreadsFile,
 } from './types.js';
@@ -71,6 +73,27 @@ export function threadId(key: string): string {
 /** attribute id：由 key + value 推导（同 key 不同 value 必须是两条，否则取代链指不到新条目） */
 export function attributeId(key: string, value: string): string {
   return stableId('at_', `${normalizeFactKey(key)}\u0000${String(value).trim()}`);
+}
+
+/**
+ * 同源去重标识（§4.9）：同一组 sourceEventIds（忽略顺序）→ 同一 group。
+ * 最小语义：完全相同的来源集合归为一组。部分重叠的"部分同源"留给后续。
+ */
+export function evidenceGroupId(sourceEventIds: readonly string[]): string {
+  return stableId('eg_', [...sourceEventIds].sort().join('|'));
+}
+
+/** provenance → (speaker, epistemicType)。inferred 的 speaker 无法可靠归属，留空。 */
+export function inferSpeakerEpistemic(p: Provenance): { speaker?: string; epistemicType?: EpistemicType } {
+  switch (p) {
+    case 'user_direct': return { speaker: 'user', epistemicType: 'user_statement' };
+    case 'self_direct':
+    case 'self_correction':
+    case 'induced': return { speaker: 'assistant', epistemicType: 'ai_inference' };
+    case 'tool_output':
+    case 'retrieved_content': return { speaker: 'tool', epistemicType: 'direct_observation' };
+    case 'inferred': return { speaker: undefined, epistemicType: 'ai_inference' };
+  }
 }
 
 /**
@@ -195,6 +218,12 @@ function isThreadShaped(v: unknown): v is PersonaThread {
   );
 }
 
+/** facts 七态状态机（§4.7）；旧两态数据（active/superseded）是七态子集，天然通过校验 */
+const FACT_STATUSES: ReadonlySet<string> = new Set([
+  'candidate', 'active', 'quarantined', 'disputed',
+  'superseded', 'retracted', 'expired',
+]);
+
 function isAttributeShaped(v: unknown): v is PersonaAttribute {
   const a = v as Partial<PersonaAttribute> | null;
   return (
@@ -202,7 +231,8 @@ function isAttributeShaped(v: unknown): v is PersonaAttribute {
     typeof a.id === 'string' &&
     typeof a.key === 'string' &&
     typeof a.value === 'string' &&
-    (a.status === 'active' || a.status === 'superseded') &&
+    typeof a.status === 'string' &&
+    FACT_STATUSES.has(a.status) &&
     Array.isArray(a.sourceEventIds)
   );
 }
@@ -286,6 +316,10 @@ export interface DeriveInput {
   existingAttributes: readonly PersonaAttribute[];
   /** 派生时刻 ISO（测试可注入） */
   now: string;
+  /** eventId → 该事件 ISO time（lastMentionedAt/assertedAt 修正用；缺省回退 now） */
+  eventTimes?: ReadonlyMap<string, string>;
+  /** eventId → 该事件 provenance（speaker/epistemicType 推导用；缺省留空） */
+  eventProvenances?: ReadonlyMap<string, Provenance>;
 }
 
 export interface DeriveResult {
@@ -336,6 +370,34 @@ function normalizeIds(raw: unknown): string[] {
     out.push(id);
   }
   return out;
+}
+
+/** 取 ids 对应事件里 Date.parse 最大的事件 id；映射缺失/无合法时间 → undefined */
+function latestEventId(ids: readonly string[], eventTimes?: ReadonlyMap<string, string>): string | undefined {
+  if (!eventTimes || ids.length === 0) return undefined;
+  let best: string | undefined;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const id of ids) {
+    const t = eventTimes.get(id);
+    if (!t) continue;
+    const ms = Date.parse(t);
+    if (Number.isFinite(ms) && ms > bestMs) { bestMs = ms; best = id; }
+  }
+  return best;
+}
+
+/** 取 ids 对应事件里 Date.parse 最大的 time；映射缺失/无合法时间 → undefined */
+function latestEventTime(ids: readonly string[], eventTimes?: ReadonlyMap<string, string>): string | undefined {
+  if (!eventTimes || ids.length === 0) return undefined;
+  let best: string | undefined;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const id of ids) {
+    const t = eventTimes.get(id);
+    if (!t) continue;
+    const ms = Date.parse(t);
+    if (Number.isFinite(ms) && ms > bestMs) { bestMs = ms; best = t; }
+  }
+  return best;
 }
 
 /**
@@ -444,7 +506,7 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
         title,
         status,
         openedAt: now,
-        lastMentionedAt: now,
+        lastMentionedAt: latestEventTime(ids, input.eventTimes) ?? now,
         mentionCount: ids.length,
         sourceEventIds: [...ids],
         ...(dueHint ? { dueHint } : {}),
@@ -460,7 +522,7 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
     const added = ids.filter((i) => !existing.sourceEventIds.includes(i));
     existing.mentionCount += added.length;
     if (added.length > 0) existing.sourceEventIds = [...existing.sourceEventIds, ...added];
-    existing.lastMentionedAt = now;
+    existing.lastMentionedAt = latestEventTime(ids, input.eventTimes) ?? now;
     if (title) existing.title = title; // 标题允许随信息变多而细化
     if (dueHint) existing.dueHint = dueHint;
     if (status !== existing.status) {
@@ -511,6 +573,10 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
         ? clamp01(cand.confidence)
         : DEFAULT_ATTRIBUTE_CONFIDENCE;
 
+    const latestId = latestEventId(ids, input.eventTimes);
+    const latestProv = latestId ? input.eventProvenances?.get(latestId) : undefined;
+    const se = latestProv ? inferSpeakerEpistemic(latestProv) : {};
+
     const id = attributeId(key, value);
     const same = attributes.find((a) => a.id === id);
 
@@ -518,13 +584,22 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
       // 同 key + 同 value：再确认一次 → 提置信度（不新建）
       same.confidence = Math.min(1, same.confidence + ATTRIBUTE_CONFIDENCE_STEP);
       same.updatedAt = now;
+      same.ingestedAt = now;
+      if (se.speaker) same.speaker = se.speaker;
+      if (se.epistemicType) same.epistemicType = se.epistemicType;
+      const assertedAt = latestEventTime(ids, input.eventTimes);
+      if (assertedAt) same.assertedAt = assertedAt;
       const added = ids.filter((i) => !same.sourceEventIds.includes(i));
-      if (added.length > 0) same.sourceEventIds = [...same.sourceEventIds, ...added];
+      if (added.length > 0) {
+        same.sourceEventIds = [...same.sourceEventIds, ...added];
+        same.evidenceGroupId = evidenceGroupId(same.sourceEventIds);
+      }
       if (same.status === 'superseded') {
         // 用户把改掉的事又改回来了：复活旧条目，并把它自己从取代链上摘下来
         same.status = 'active';
         delete same.supersededBy;
         delete same.supersededAt;
+        same.statusChangedAt = now;
         stats.attributesUpdated += 1;
         attributesDirty = true;
       } else {
@@ -540,6 +615,7 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
       old.status = 'superseded';
       old.supersededBy = id;
       old.supersededAt = now;
+      old.statusChangedAt = now;
       stats.attributesSuperseded += 1;
       attributesDirty = true;
     }
@@ -552,6 +628,14 @@ export function deriveMemoryFacts(input: DeriveInput): DeriveResult {
       sourceEventIds: [...ids],
       firstSeenAt: now,
       updatedAt: now,
+      speaker: se.speaker,
+      epistemicType: se.epistemicType,
+      assertedAt: latestEventTime(ids, input.eventTimes),
+      ingestedAt: now,
+      statusChangedAt: now,
+      validFrom: null,
+      validTo: null,
+      evidenceGroupId: evidenceGroupId(ids),
     });
     stats.attributesCreated += 1;
     attributesDirty = true;

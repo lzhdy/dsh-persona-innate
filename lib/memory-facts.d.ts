@@ -1,4 +1,4 @@
-import type { MemoryFactStats, PersonaAttribute, PersonaEvent, PersonaThread } from './types.js';
+import type { EpistemicType, MemoryFactStats, PersonaAttribute, PersonaEvent, PersonaThread, Provenance } from './types.js';
 import type { KVStore } from './store.js';
 /**
  * open thread 多久没被提及就收敛为 expired（天）。
@@ -22,6 +22,16 @@ export declare function stableId(prefix: string, seed: string): string;
 export declare function threadId(key: string): string;
 /** attribute id：由 key + value 推导（同 key 不同 value 必须是两条，否则取代链指不到新条目） */
 export declare function attributeId(key: string, value: string): string;
+/**
+ * 同源去重标识（§4.9）：同一组 sourceEventIds（忽略顺序）→ 同一 group。
+ * 最小语义：完全相同的来源集合归为一组。部分重叠的"部分同源"留给后续。
+ */
+export declare function evidenceGroupId(sourceEventIds: readonly string[]): string;
+/** provenance → (speaker, epistemicType)。inferred 的 speaker 无法可靠归属，留空。 */
+export declare function inferSpeakerEpistemic(p: Provenance): {
+    speaker?: string;
+    epistemicType?: EpistemicType;
+};
 /**
  * 归一化主题 key：去首尾空白、压缩内部空白、统一小写。
  * 小写对中文无影响，但对英文 key（Pet / pet）是必需的——否则同一件事会分裂成两条 thread。
@@ -110,6 +120,10 @@ export interface DeriveInput {
     existingAttributes: readonly PersonaAttribute[];
     /** 派生时刻 ISO（测试可注入） */
     now: string;
+    /** eventId → 该事件 ISO time（lastMentionedAt/assertedAt 修正用；缺省回退 now） */
+    eventTimes?: ReadonlyMap<string, string>;
+    /** eventId → 该事件 provenance（speaker/epistemicType 推导用；缺省留空） */
+    eventProvenances?: ReadonlyMap<string, Provenance>;
 }
 export interface DeriveResult {
     threads: PersonaThread[];

@@ -15,6 +15,7 @@ import type {
   PersonaFact,
   PersonaStage,
   PromotionDecision,
+  Provenance,
   ReviewInput,
   ReviewOutput,
   SelfImportanceEntry,
@@ -233,9 +234,13 @@ export class DailyReviewEngine {
 
     // sourceEventIds 存在性校验必须拿全量事件判：只拿当日窗口会把"上周的面试"误判成编造
     let knownEventIds: Set<string>;
+    let eventTimes: Map<string, string>;
+    let eventProvenances: Map<string, Provenance>;
     try {
       const all = opts.allEvents ?? (await new EventLog(this.deps.store).load());
       knownEventIds = new Set(all.map((e) => e.id));
+      eventTimes = new Map(all.map((e) => [e.id, e.time]));
+      eventProvenances = new Map(all.map((e) => [e.id, e.provenance]));
     } catch (err) {
       return emptyMemoryFactStats({
         ran: false,
@@ -269,6 +274,8 @@ export class DailyReviewEngine {
       existingThreads: threadsLoaded.items,
       existingAttributes: attributesLoaded.items,
       now,
+      eventTimes,
+      eventProvenances,
     });
 
     let persisted = false;

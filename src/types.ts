@@ -497,6 +497,14 @@ export interface PersonaThread {
   expiredAt?: string;
 }
 
+/** facts 七态状态机（§4.7） */
+export type FactStatus =
+  | 'candidate' | 'active' | 'quarantined' | 'disputed'
+  | 'superseded' | 'retracted' | 'expired';
+
+/** 认识论类型（§4.3）：谁以何种方式提出该主张 */
+export type EpistemicType = 'direct_observation' | 'user_statement' | 'ai_inference';
+
 /** 不过期的长期事实（用户属性/世界事实），只提置信度或被取代 */
 export interface PersonaAttribute {
   /**
@@ -509,7 +517,7 @@ export interface PersonaAttribute {
   key: string;
   /** '杭州某电商公司做后端' */
   value: string;
-  status: 'active' | 'superseded';
+  status: FactStatus;
   /** 0..1 */
   confidence: number;
   sourceEventIds: string[];
@@ -518,6 +526,25 @@ export interface PersonaAttribute {
   /** 指向取代它的新 attribute id */
   supersededBy?: string;
   supersededAt?: string;
+  /** 谁提出该主张（§4.3 speaker；'user' | 'assistant' | 'system' | 'tool'，未知留空） */
+  speaker?: string;
+  /** 说谁/说什么（§4.3 subject；禁止由 speaker 推断，未知留空） */
+  subject?: string;
+  /** 最小结构化主张的谓词（§4.3 predicate；本轮不推导，留空） */
+  predicate?: string;
+  /** 认识论类型（§4.3；从事件 provenance 推导） */
+  epistemicType?: EpistemicType;
+  /** 何时说的（§4.8；= 最新 sourceEvent 的 time，不可得留空） */
+  assertedAt?: string;
+  /** 系统何时写入（§4.8；= 派生时刻） */
+  ingestedAt?: string;
+  /** 内容所指有效区间（§4.8；本轮不推导，null=未知） */
+  validFrom?: string | null;
+  validTo?: string | null;
+  /** 系统何时改变该版本状态（§4.8；写入时 = ingestedAt） */
+  statusChangedAt?: string;
+  /** 同源去重标识（§4.9；从 sourceEventIds 稳定推导） */
+  evidenceGroupId?: string;
 }
 
 /** threads 存储文件（单文件，数百条以内，不分片） */
