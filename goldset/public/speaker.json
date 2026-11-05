@@ -1,0 +1,35 @@
+[
+  {
+    "id": "spk-001",
+    "category": "speaker",
+    "question": "11月3日晚上，谁说「海克斯大乱斗打得怎么样」？",
+    "goldAnswer": "user",
+    "allowAbstain": false,
+    "evidenceEventIds": ["e-001"],
+    "speaker": "user",
+    "timeRange": { "from": "2026-11-03", "to": "2026-11-03" },
+    "validity": "active"
+  },
+  {
+    "id": "spk-002",
+    "category": "speaker",
+    "question": "「你是不是说你更喜欢简洁回复？」这句话是谁说的？",
+    "goldAnswer": "assistant",
+    "allowAbstain": false,
+    "evidenceEventIds": ["e-002"],
+    "speaker": "assistant",
+    "timeRange": null,
+    "validity": "active"
+  },
+  {
+    "id": "spk-003",
+    "category": "speaker",
+    "question": "「每日复盘已生成」这条消息是谁发出的？",
+    "goldAnswer": "system",
+    "allowAbstain": false,
+    "evidenceEventIds": ["e-003"],
+    "speaker": "system",
+    "timeRange": null,
+    "validity": "active"
+  }
+]

@@ -1,0 +1,35 @@
+[
+  {
+    "id": "rel-001",
+    "category": "relative_time",
+    "question": "11月3日21:14发生的事，在11月4日的问答里被说成「昨天」，它应归一化到哪一天？",
+    "goldAnswer": "2026-11-03",
+    "allowAbstain": false,
+    "evidenceEventIds": ["e-004"],
+    "speaker": null,
+    "timeRange": { "from": "2026-11-03", "to": "2026-11-03" },
+    "validity": "active"
+  },
+  {
+    "id": "rel-002",
+    "category": "relative_time",
+    "question": "11月3日23:59与11月4日00:01的两条消息属于同一天吗？",
+    "goldAnswer": "否",
+    "allowAbstain": false,
+    "evidenceEventIds": ["e-005", "e-006"],
+    "speaker": null,
+    "timeRange": { "from": "2026-11-03", "to": "2026-11-04" },
+    "validity": "active"
+  },
+  {
+    "id": "rel-003",
+    "category": "relative_time",
+    "question": "事件发生于11月3日，11月4日复盘时被标成「昨天」，11月5日再问这件事是「几天前」？",
+    "goldAnswer": "2天前",
+    "allowAbstain": false,
+    "evidenceEventIds": ["e-007"],
+    "speaker": null,
+    "timeRange": { "from": "2026-11-03", "to": "2026-11-03" },
+    "validity": "active"
+  }
+]
