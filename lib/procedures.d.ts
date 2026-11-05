@@ -7,10 +7,8 @@
  * 无证据的 procedure = 预设脚本 → 整条丢弃。
  *
  * 本文件不含 LLM 调用，全部是纯函数 + 存储；调用点只有复盘引擎（写入路径必须零 LLM 调用）。
- * 复用 memory-facts.ts 的存储与校验模式：只 import 已导出的纯函数与类型
- * （stableId / normalizeFactKey / evidenceGroupId / FactLoad），
- * normalizeIds / checkIds / latestEventTime 等校验小工具在模块内自实现，
- * 避免依赖其私有实现（不改 facts 现有逻辑）。
+ * 复用 memory-facts.ts 的存储与校验模式：import 其已导出的纯函数与类型
+ * （stableId / normalizeFactKey / evidenceGroupId / checkIds / normalizeIds / latestEventTime / FactLoad）。
  */
 import type { PersonaProcedure, ProcedureStats } from './types.js';
 import { type FactLoad } from './memory-facts.js';

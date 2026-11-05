@@ -7,10 +7,8 @@
  * 无证据的 procedure = 预设脚本 → 整条丢弃。
  *
  * 本文件不含 LLM 调用，全部是纯函数 + 存储；调用点只有复盘引擎（写入路径必须零 LLM 调用）。
- * 复用 memory-facts.ts 的存储与校验模式：只 import 已导出的纯函数与类型
- * （stableId / normalizeFactKey / evidenceGroupId / FactLoad），
- * normalizeIds / checkIds / latestEventTime 等校验小工具在模块内自实现，
- * 避免依赖其私有实现（不改 facts 现有逻辑）。
+ * 复用 memory-facts.ts 的存储与校验模式：import 其已导出的纯函数与类型
+ * （stableId / normalizeFactKey / evidenceGroupId / checkIds / normalizeIds / latestEventTime / FactLoad）。
  */
 import type {
   FactDropReason,
@@ -19,8 +17,11 @@ import type {
   ProcedureStats,
 } from './types.js';
 import {
+  checkIds,
   evidenceGroupId,
+  latestEventTime,
   normalizeFactKey,
+  normalizeIds,
   stableId,
   type FactLoad,
 } from './memory-facts.js';
@@ -179,48 +180,6 @@ function errorMessage(err: unknown): string {
 function drop(stats: ProcedureStats, reason: FactDropReason): void {
   stats.dropped += 1;
   stats.dropReasons[reason] = (stats.dropReasons[reason] ?? 0) + 1;
-}
-
-/** 规整 sourceEventIds：只留非空字符串并去重（LLM 常给重复 id） */
-function normalizeIds(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const v of raw) {
-    if (typeof v !== 'string') continue;
-    const id = v.trim();
-    if (!id || out.includes(id)) continue;
-    out.push(id);
-  }
-  return out;
-}
-
-/** 取 ids 对应事件里 Date.parse 最大的 time；映射缺失/无合法时间 → undefined */
-function latestEventTime(ids: readonly string[], eventTimes?: ReadonlyMap<string, string>): string | undefined {
-  if (!eventTimes || ids.length === 0) return undefined;
-  let best: string | undefined;
-  let bestMs = Number.NEGATIVE_INFINITY;
-  for (const id of ids) {
-    const t = eventTimes.get(id);
-    if (!t) continue;
-    const ms = Date.parse(t);
-    if (Number.isFinite(ms) && ms > bestMs) { bestMs = ms; best = t; }
-  }
-  return best;
-}
-
-/**
- * sourceEventIds 校验：非空 + 每个 id 都必须在 events 里真实存在。
- * 不通过就整条丢弃——"补一个空数组"等于放行一条无证据的 procedure（预设脚本）。
- */
-function checkIds(
-  ids: readonly string[],
-  knownEventIds: ReadonlySet<string>,
-): { ok: true } | { ok: false; reason: FactDropReason } {
-  if (ids.length === 0) return { ok: false, reason: 'no-source' };
-  for (const id of ids) {
-    if (!knownEventIds.has(id)) return { ok: false, reason: 'unknown-source' };
-  }
-  return { ok: true };
 }
 
 /**

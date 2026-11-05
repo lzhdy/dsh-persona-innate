@@ -360,7 +360,7 @@ function drop(stats: MemoryFactStats, reason: FactDropReason): void {
 }
 
 /** 规整 sourceEventIds：只留非空字符串并去重（LLM 常给重复 id） */
-function normalizeIds(raw: unknown): string[] {
+export function normalizeIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
   for (const v of raw) {
@@ -387,7 +387,7 @@ function latestEventId(ids: readonly string[], eventTimes?: ReadonlyMap<string, 
 }
 
 /** 取 ids 对应事件里 Date.parse 最大的 time；映射缺失/无合法时间 → undefined */
-function latestEventTime(ids: readonly string[], eventTimes?: ReadonlyMap<string, string>): string | undefined {
+export function latestEventTime(ids: readonly string[], eventTimes?: ReadonlyMap<string, string>): string | undefined {
   if (!eventTimes || ids.length === 0) return undefined;
   let best: string | undefined;
   let bestMs = Number.NEGATIVE_INFINITY;
@@ -405,7 +405,7 @@ function latestEventTime(ids: readonly string[], eventTimes?: ReadonlyMap<string
  * 不通过就整条丢弃——"补一个空数组"等于放行一条无证据的记忆，
  * 与 traceableInferred 的口径一致（不可追溯的推导视为无效）。
  */
-function checkIds(
+export function checkIds(
   ids: readonly string[],
   knownEventIds: ReadonlySet<string>,
 ): { ok: true } | { ok: false; reason: FactDropReason } {

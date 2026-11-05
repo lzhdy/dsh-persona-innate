@@ -1,4 +1,4 @@
-import type { EpistemicType, MemoryFactStats, PersonaAttribute, PersonaEvent, PersonaThread, Provenance } from './types.js';
+import type { EpistemicType, FactDropReason, MemoryFactStats, PersonaAttribute, PersonaEvent, PersonaThread, Provenance } from './types.js';
 import type { KVStore } from './store.js';
 /**
  * open thread 多久没被提及就收敛为 expired（天）。
@@ -136,6 +136,21 @@ export interface DeriveResult {
 }
 /** 造一份零值统计（调用方可覆盖部分字段） */
 export declare function emptyMemoryFactStats(patch?: Partial<MemoryFactStats>): MemoryFactStats;
+/** 规整 sourceEventIds：只留非空字符串并去重（LLM 常给重复 id） */
+export declare function normalizeIds(raw: unknown): string[];
+/** 取 ids 对应事件里 Date.parse 最大的 time；映射缺失/无合法时间 → undefined */
+export declare function latestEventTime(ids: readonly string[], eventTimes?: ReadonlyMap<string, string>): string | undefined;
+/**
+ * sourceEventIds 校验：非空 + 每个 id 都必须在 events 里真实存在。
+ * 不通过就整条丢弃——"补一个空数组"等于放行一条无证据的记忆，
+ * 与 traceableInferred 的口径一致（不可追溯的推导视为无效）。
+ */
+export declare function checkIds(ids: readonly string[], knownEventIds: ReadonlySet<string>): {
+    ok: true;
+} | {
+    ok: false;
+    reason: FactDropReason;
+};
 /**
  * 把 LLM 输出派生为 threads / attributes（纯函数，无 I/O，可单测）。
  *
