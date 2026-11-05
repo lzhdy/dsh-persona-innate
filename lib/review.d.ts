@@ -7,7 +7,7 @@
  *       （SelfModelServiceLike / StateMachineLike）。event-log / memory-facts 都只依赖
  *       types + store，不构成环。
  */
-import type { LlmClient, MemoryFactStats, PersonaEvent, PersonaFact, PersonaStage, ReviewInput, ReviewOutput, SelfImportanceEntry, SelfModelDiff, SelfModelServiceLike, SelfModelSnapshot, StateMachineLike, UserFeedback } from './types.js';
+import type { LlmClient, MemoryFactStats, PersonaEvent, PersonaFact, PersonaStage, ProcedureStats, ReviewInput, ReviewOutput, SelfImportanceEntry, SelfModelDiff, SelfModelServiceLike, SelfModelSnapshot, StateMachineLike, UserFeedback } from './types.js';
 import type { KVStore } from './store.js';
 /** 复盘依赖（运行时注入；state 在 M1 复盘流水线内不写回，仅保留注入位） */
 export interface ReviewDeps {
@@ -33,6 +33,18 @@ export declare const REVIEW_PROMPTS: {
  * 而这类错误一旦落盘就长期存在。分开问，结构上就不会串。
  */
 export declare const MEMORY_FACT_PROMPT: string;
+/**
+ * 增量1 程序性记忆派生 prompt（procedures）。
+ *
+ * 为什么单独一步而不是塞进 MEMORY_FACT_PROMPT：facts 是"发生了什么"，
+ * procedures 是"她怎么做的"，寿命与晋升门槛不同（candidate 默认冻结、跨 ≥2 日期才 active），
+ * 混在一个 prompt 里会让模型把"做法"写成"事实"或反过来。
+ *
+ * 红线落地：prompt 明确要求"只能归纳你自己（assistant）的做法、禁止祈使句、禁止预设"，
+ * 但 prompt 约束不是门禁——真正拦下预设脚本的是 deriveProcedures 的 stripMemoryFact +
+ * sourceEventIds 存在性校验（无证据整条丢弃）。
+ */
+export declare const PROCEDURE_PROMPT: string;
 /** 每日复盘引擎：8 步流水线（§10），LLM 输出解析失败时该步降级为空继续，保证 mock 无 key 可跑 */
 export declare class DailyReviewEngine {
     private readonly deps;
@@ -43,6 +55,11 @@ export declare class DailyReviewEngine {
      * 测试把 store 换成临时目录（或故意读失败的实现）即可，不需要额外的注入点。
      */
     private readonly facts;
+    /**
+     * procedures 存储（增量1）。
+     * 复用注入进来的 store 构造，而不是在方法里读文件——测试把 store 换成临时目录即可。
+     */
+    private readonly procedures;
     constructor(deps: ReviewDeps, opts?: ReviewOptions);
     /** O17：无输入 skip；仅身体事件（initiation=external_triggered）degraded；其余 full */
     shouldRun(input: ReviewInput): 'full' | 'degraded' | 'skip';
@@ -70,6 +87,22 @@ export declare class DailyReviewEngine {
         now?: string;
         allEvents?: readonly PersonaEvent[];
     }): Promise<MemoryFactStats>;
+    /**
+     * step4.6（增量1）：从当日事件派生 procedures（LLM #5，单独计入 cost.procedureCalls）。
+     *
+     * 与 extractThreadsAndAttributes 同一失败姿态：
+     * - imported 事件不参与（补记忆不补成长）；
+     * - 读不到既有 procedures → 直接返回，不写盘（否则用空集合覆盖全库）；
+     * - LLM 输出不是 JSON → 直接返回，不写盘；
+     * - 写盘抛错 → 捕获并记进 stats.error，不打断复盘主流程。
+     *
+     * 晋升闸门：deriveProcedures 产出后，对每条 candidate 跑 decideProcedurePromotion，
+     * 达标者 status='active' + statusChangedAt=now，否则保持 candidate（默认冻结）。
+     */
+    extractProcedures(events: readonly PersonaEvent[], opts?: {
+        now?: string;
+        allEvents?: readonly PersonaEvent[];
+    }): Promise<ProcedureStats>;
     /** step5 一致性检查（§9：新认知须有事件证据） */
     consistencyCheck(diff: SelfModelDiff, facts: PersonaFact[]): {
         ok: boolean;

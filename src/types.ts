@@ -371,6 +371,8 @@ export interface ReviewOutput {
   selfImportance: SelfImportanceEntry[];
   /** v0.6：threads / attributes 派生统计（供 /persona review 展示；降级/skip 时为未执行） */
   memoryFacts: MemoryFactStats;
+  /** 增量1：procedures 程序性记忆派生统计（降级/skip 时为未执行） */
+  procedures?: ProcedureStats;
   /** P2：本次 traits 晋升/隔离决策 */
   promotion?: { decision: PromotionDecision; candidateCount: number };
   cost: {
@@ -382,6 +384,8 @@ export interface ReviewOutput {
      * 既有观测与断言都按这个口径读；混进去会把"核心复盘变贵了"和"多了一步派生"混为一谈。
      */
     memoryFactCalls: number;
+    /** 增量1：procedures 派生这一步的 LLM 调用数，单独计（口径同 memoryFactCalls） */
+    procedureCalls: number;
   };
 }
 
@@ -592,6 +596,65 @@ export interface MemoryFactStats {
   fieldsStripped: number;
   /** 本次收敛为 expired 的 thread 数 */
   expired: number;
+  /** 未能完成的原因（读盘失败 / 解析失败 / 写盘失败），供 /persona review 展示 */
+  error?: string;
+}
+
+/* ══════════════════════ 增量1 procedures 程序性记忆层 ══════════════════════ */
+/* 机制依据：《记忆架构最终设计 v1.1》§16.1（增量1）+ §4.4（晋升门槛）+ §4.7（七态状态机）。
+ * 红线：procedures 只能长出来、不能写进去——必须是 AI 从自身经历归纳的做法，
+ * 绝不预设行为规则/角色卡/话术。 */
+
+/** 程序性记忆（procedure）：她从经历归纳的"遇到什么情况、怎么做"（§16.1 增量1） */
+export interface PersonaProcedure {
+  /** 'pr_' + 稳定哈希（由 trigger 推导，同 trigger 跨天合并） */
+  id: string;
+  /** 情境：遇到什么情况（描述性，非祈使句） */
+  trigger: string;
+  /** 做法：她怎么做（描述性，非祈使句） */
+  action: string;
+  /** 依据：为什么这样做（指向具体经历） */
+  rationale: string;
+  /** 谁提出（固定 'assistant'，她自己的做法） */
+  speaker: string;
+  /** 认识论类型（固定 'ai_inference'，红线） */
+  epistemicType: EpistemicType;
+  /** 七态（默认 candidate，红线） */
+  status: FactStatus;
+  confidence: number;
+  /** 证据链：她经历的事件 id，非空且真实（红线） */
+  sourceEventIds: string[];
+  evidenceGroupId?: string;
+  assertedAt?: string;
+  ingestedAt?: string;
+  validFrom?: string | null;
+  validTo?: string | null;
+  statusChangedAt?: string;
+  firstSeenAt: string;
+  updatedAt: string;
+  /** 取代它的新 procedure id（做法演化时） */
+  supersededBy?: string;
+  supersededAt?: string;
+}
+
+/** procedures 存储文件 */
+export interface ProceduresFile {
+  version: 1;
+  procedures: PersonaProcedure[];
+}
+
+/** procedure 派生统计（ReviewOutput.procedures） */
+export interface ProcedureStats {
+  /** 是否发起了派生（含 LLM 调用与读盘） */
+  ran: boolean;
+  /** 本次是否真的写了盘 */
+  persisted: boolean;
+  proceduresCreated: number;
+  proceduresUpdated: number;
+  proceduresPromoted: number;
+  /** 被丢弃的条目总数（= dropReasons 之和） */
+  dropped: number;
+  dropReasons: Record<FactDropReason, number>;
   /** 未能完成的原因（读盘失败 / 解析失败 / 写盘失败），供 /persona review 展示 */
   error?: string;
 }

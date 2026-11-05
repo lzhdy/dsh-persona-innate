@@ -14,6 +14,7 @@ import type {
   PersonaEvent,
   PersonaFact,
   PersonaStage,
+  ProcedureStats,
   PromotionDecision,
   Provenance,
   ReviewInput,
@@ -28,12 +29,19 @@ import type {
 import type { KVStore } from './store.js';
 import { EventLog } from './event-log.js';
 import { decidePromotion } from './promotion.js';
+import { decideProcedurePromotion } from './procedure-promotion.js';
 import {
   MemoryFactStore,
   deriveMemoryFacts,
   emptyMemoryFactStats,
   type RawMemoryFactOutput,
 } from './memory-facts.js';
+import {
+  ProcedureStore,
+  deriveProcedures,
+  emptyProcedureStats,
+  type RawProcedureOutput,
+} from './procedures.js';
 
 /** 复盘依赖（运行时注入；state 在 M1 复盘流水线内不写回，仅保留注入位） */
 export interface ReviewDeps {
@@ -91,6 +99,25 @@ export const MEMORY_FACT_PROMPT: string = [
   'sourceEventIds 必须逐字取自下面列出的事件 id，不要编造；没有可派生的内容就输出 {"threads":[],"attributes":[]}。',
 ].join('\n');
 
+/**
+ * 增量1 程序性记忆派生 prompt（procedures）。
+ *
+ * 为什么单独一步而不是塞进 MEMORY_FACT_PROMPT：facts 是"发生了什么"，
+ * procedures 是"她怎么做的"，寿命与晋升门槛不同（candidate 默认冻结、跨 ≥2 日期才 active），
+ * 混在一个 prompt 里会让模型把"做法"写成"事实"或反过来。
+ *
+ * 红线落地：prompt 明确要求"只能归纳你自己（assistant）的做法、禁止祈使句、禁止预设"，
+ * 但 prompt 约束不是门禁——真正拦下预设脚本的是 deriveProcedures 的 stripMemoryFact +
+ * sourceEventIds 存在性校验（无证据整条丢弃）。
+ */
+export const PROCEDURE_PROMPT: string = [
+  '你是反思端模型。从当日事件里，归纳"你自己遇到什么情况、是怎么做的"，只输出 JSON。',
+  '格式：{"procedures":[{"trigger":"遇到什么情况（描述性）","action":"你怎么做（描述性）","rationale":"为什么这样做","sourceEventIds":["事件id"]}]}',
+  'trigger/action/rationale 必须用描述性陈述（如"当用户问开放问题时，我会先澄清再展开"），禁止祈使句（"你应该…"、"提醒用户…"）。',
+  '只能归纳你自己（assistant）的做法，不能把用户的要求写成你的做法，不能预设任何行为规则。',
+  'sourceEventIds 必须逐字取自下面列出的事件 id，不要编造；没有可归纳的就输出 {"procedures":[]}。',
+].join('\n');
+
 // TODO(calibrate)：关键事件筛选的重要性下限
 const MIN_KEY_EVENT_IMPORTANCE = 0.2;// TODO(calibrate)：单次复盘最多保留的关键事件数
 const MAX_KEY_EVENTS = 20;
@@ -114,11 +141,18 @@ export class DailyReviewEngine {
    */
   private readonly facts: MemoryFactStore;
 
+  /**
+   * procedures 存储（增量1）。
+   * 复用注入进来的 store 构造，而不是在方法里读文件——测试把 store 换成临时目录即可。
+   */
+  private readonly procedures: ProcedureStore;
+
   constructor(
     private readonly deps: ReviewDeps,
     private readonly opts: ReviewOptions = {},
   ) {
     this.facts = new MemoryFactStore(deps.store);
+    this.procedures = new ProcedureStore(deps.store);
   }
 
   /** O17：无输入 skip；仅身体事件（initiation=external_triggered）degraded；其余 full */
@@ -291,6 +325,102 @@ export class DailyReviewEngine {
     return { ...derived.stats, persisted, ...(error ? { error } : {}) };
   }
 
+  /**
+   * step4.6（增量1）：从当日事件派生 procedures（LLM #5，单独计入 cost.procedureCalls）。
+   *
+   * 与 extractThreadsAndAttributes 同一失败姿态：
+   * - imported 事件不参与（补记忆不补成长）；
+   * - 读不到既有 procedures → 直接返回，不写盘（否则用空集合覆盖全库）；
+   * - LLM 输出不是 JSON → 直接返回，不写盘；
+   * - 写盘抛错 → 捕获并记进 stats.error，不打断复盘主流程。
+   *
+   * 晋升闸门：deriveProcedures 产出后，对每条 candidate 跑 decideProcedurePromotion，
+   * 达标者 status='active' + statusChangedAt=now，否则保持 candidate（默认冻结）。
+   */
+  async extractProcedures(
+    events: readonly PersonaEvent[],
+    opts: { now?: string; allEvents?: readonly PersonaEvent[] } = {},
+  ): Promise<ProcedureStats> {
+    const now = opts.now ?? new Date().toISOString();
+    // 历史导入事件只补记忆不补成长：它们能塑造"事实"，但不能塑造"她自己的做法"
+    const source = events.filter((e) => !e.imported);
+    if (source.length === 0) return emptyProcedureStats({ ran: false });
+
+    const loaded = await this.procedures.loadProcedures();
+    if (!loaded.ok) {
+      return emptyProcedureStats({
+        ran: false,
+        error: `现有 procedures 不可读，本次不写盘（${loaded.reason}）`,
+      });
+    }
+
+    // sourceEventIds 存在性校验必须拿全量事件判：只拿当日窗口会把"上周的做法"误判成编造
+    let knownEventIds: Set<string>;
+    let eventTimes: Map<string, string>;
+    try {
+      const all = opts.allEvents ?? (await new EventLog(this.deps.store).load());
+      knownEventIds = new Set(all.map((e) => e.id));
+      eventTimes = new Map(all.map((e) => [e.id, e.time]));
+    } catch (err) {
+      return emptyProcedureStats({
+        ran: false,
+        error: `全量事件不可读，无法校验来源，本次不写盘（${(err as Error).message}）`,
+      });
+    }
+
+    const listing = source
+      .slice(-MAX_FACT_EVENTS)
+      .map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`)
+      .join('\n');
+
+    const raw = await this.deps.llm.complete({
+      role: 'reflect',
+      prompt: `${PROCEDURE_PROMPT}\n\n当日事件：\n${listing}`,
+    });
+    const parsed = this.parseJsonLoose(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return emptyProcedureStats({ ran: true, error: '派生输出不是 JSON 对象，本次不写盘' });
+    }
+
+    const derived = deriveProcedures({
+      raw: parsed as RawProcedureOutput,
+      knownEventIds,
+      existingProcedures: loaded.items,
+      now,
+      eventTimes,
+    });
+
+    // 晋升闸门（§4.4 保守近似）：candidate → active 须跨 ≥2 个日期；单日窗口恒 false
+    let promoted = 0;
+    for (const p of derived.procedures) {
+      if (p.status !== 'candidate') continue;
+      const decision = decideProcedurePromotion(p, eventTimes);
+      if (decision.promote) {
+        p.status = 'active';
+        p.statusChangedAt = now;
+        promoted += 1;
+      }
+    }
+
+    let persisted = false;
+    let error: string | undefined;
+    try {
+      if (derived.dirty || promoted > 0) {
+        await this.procedures.saveProcedures(derived.procedures);
+        persisted = true;
+      }
+    } catch (err) {
+      error = `写盘失败：${(err as Error).message}`;
+    }
+
+    return {
+      ...derived.stats,
+      proceduresPromoted: promoted,
+      persisted,
+      ...(error ? { error } : {}),
+    };
+  }
+
   /** step5 一致性检查（§9：新认知须有事件证据） */
   consistencyCheck(diff: SelfModelDiff, facts: PersonaFact[]): { ok: boolean; issues: string[] } {
     const issues: string[] = [];
@@ -357,7 +487,7 @@ export class DailyReviewEngine {
       archiveEntry: null,
       selfImportance: [],
       memoryFacts: emptyMemoryFactStats(),
-      cost: { llmCalls: 0, memoryFactCalls: 0 },
+      cost: { llmCalls: 0, memoryFactCalls: 0, procedureCalls: 0 },
     };
     if (mode === 'skip') return out; // O17：无输入空输出
 
@@ -404,6 +534,12 @@ export class DailyReviewEngine {
     // 错误的 open/resolved 状态长期存在，只能靠用户来纠正，宁可不生成。
     out.memoryFacts = await this.extractThreadsAndAttributes(input.events, { allEvents: input.allEvents });
     out.cost.memoryFactCalls = out.memoryFacts.ran ? 1 : 0;
+
+    // step4.6（增量1）派生 procedures：只做一次 LLM 调用，结果落盘到 memory/procedures.json。
+    // 与 threads/attributes 同一位置（P2 晋升闸门之前、一致性检查之前）：它和人格固化互不依赖，
+    // 失败也不影响后面几步。
+    out.procedures = await this.extractProcedures(input.events, { allEvents: input.allEvents });
+    out.cost.procedureCalls = out.procedures.ran ? 1 : 0;
 
     const diff: SelfModelDiff = { ...selfDiff };
     if (relationshipView) diff.relationshipView = relationshipView;
