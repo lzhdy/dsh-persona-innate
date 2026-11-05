@@ -30,6 +30,7 @@ import type { KVStore } from './store.js';
 import { EventLog } from './event-log.js';
 import { decidePromotion } from './promotion.js';
 import { decideProcedurePromotion } from './procedure-promotion.js';
+import { sampleBySalience } from './recall.js';
 import {
   MemoryFactStore,
   deriveMemoryFacts,
@@ -321,10 +322,9 @@ export class DailyReviewEngine {
       });
     }
 
-    const listing = source
-      .slice(-MAX_FACT_EVENTS)
-      .map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`)
-      .join('\n');
+    const nowMs = Date.parse(now);
+    const sampled = sampleBySalience(source, MAX_FACT_EVENTS, Number.isFinite(nowMs) ? nowMs : Date.now());
+    const listing = sampled.map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`).join('\n');
     const knownThreads = threadsLoaded.items.map((t) => `${t.key}(${t.status})`).join('、') || '（无）';
     const knownAttributes =
       attributesLoaded.items
@@ -407,10 +407,9 @@ export class DailyReviewEngine {
       });
     }
 
-    const listing = source
-      .slice(-MAX_FACT_EVENTS)
-      .map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`)
-      .join('\n');
+    const nowMs = Date.parse(now);
+    const sampled = sampleBySalience(source, MAX_FACT_EVENTS, Number.isFinite(nowMs) ? nowMs : Date.now());
+    const listing = sampled.map((e) => `- [${e.id}] (${e.topic}) ${e.summary}`).join('\n');
 
     const raw = await this.deps.llm.complete({
       role: 'reflect',

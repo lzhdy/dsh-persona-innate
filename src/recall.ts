@@ -89,6 +89,27 @@ export function salienceScore(
   return weight * clamp01(e.importance) * (DECAY_FLOOR + (1 - DECAY_FLOOR) * rec);
 }
 
+/**
+ * salience 降采样（增量4 第二职责①）：按 salience 降序取 top-limit，再按时间升序恢复时序
+ * （喂给 LLM 的时间序不变）。
+ *
+ * 与"时间序取最近 N 条"（slice(-N)）不同：salienceScore 本身含 recencyFactor 时间衰减，
+ * 按 salience 降序天然平衡"近因"与"重要"——近期事件 recency 高、重要事件 importance 高，
+ * 两者都能进 top-N，避免停机多日后高 salience 长尾事件被最近的低 salience 杂事挤掉。
+ * 只影响"先看谁"，不触碰 status/confidence/有效期（红线）。
+ */
+export function sampleBySalience(
+  events: readonly PersonaEvent[],
+  limit: number,
+  nowMs: number,
+): PersonaEvent[] {
+  return events
+    .slice()
+    .sort((a, b) => salienceScore(b, nowMs) - salienceScore(a, nowMs))
+    .slice(0, limit)
+    .sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+}
+
 /* ───────────── 线索匹配（无分词依赖） ───────────── */
 
 /**
