@@ -54,8 +54,9 @@
 | 晚餐"土豆"记不住，纠正后仍继续猜 | ISS-002 | `partial` |
 | 她说"我记忆好乱"，怕被固化成性格 | ISS-038（已修） | 晋升闸门已挡；数据层已隔离两条负面特质 |
 | 改了这么多，线上到底生效没有 | ISS-027 | **已上线 0.5.5**（2026-11-05 18:08）：29 模块到位，`shadow/` 由插件写出，`raw-turns/` 已在生产落盘 48 条 |
-| 她「翻口袋」看到有联网，一用就报 `WEB_PROVIDER_CREDENTIAL_MISSING` | ISS-042（关联记录） | **已修**（2026-11-05 20:1x）：改走账号登录态鉴权；启动自检实搜 10 条结果 |
+| 她「翻口袋」看到有联网，一用就报 `WEB_PROVIDER_CREDENTIAL_MISSING` | ISS-027（关联 ISS-042） | **已修**（2026-11-05 20:1x）：改走账号登录态鉴权；启动自检实搜 10 条结果 |
 | 她上网看到的东西，下一轮就忘了 | ISS-042 | `open`：`tool_output` 零写入方，浏览经历不进记忆（身体 M4 的前置） |
+| 「上网也要扣余额吗？又不是调大模型」 | ISS-043 | **已修**（2026-11-05 20:39）：实测官方 `web_search` 每次都是一次模型调用（9804 输入 token），改为默认走免模型通道抓结果页；启动自检 300ms / 0 token |
 
 ---
 
@@ -134,6 +135,7 @@
 | ISS-020 | P5 索引 / P6 图实验待施工 | P2 | `deferred` | 依赖评测证据积累（shadow 观察 + goldset 达标） |
 | ISS-021 | 能力台账未随 P1–P4 施工更新 | P2 | `fixed` | 已补 6 条入 `ITEMS`（P1 raw_turns / 增量1 procedures / 增量2 综合泛化 / P4 装配器 / 增量4 salience / 增量5 goldset），并给审计脚本新增 `scripts/*.mjs` 与 `package.json` 扫描面；台账 29→35 项（已实现 15 · 半接 10 · 零实现 10），`npm run audit` 通过 |
 | ISS-042 | 浏览 / 搜索经历不回注记忆（`tool_output` 零写入方） | P1 | `open` | `provenance.ts` 有 `tool_output` 权重（可信度 0.4、显著性 0.15）、`recall.ts` 有槽位、`memory-facts.ts` 有分支，但**没有任何代码把 `tool/result` 写成事件**——她搜到的内容只在当轮上下文，下一轮就没了。身体（M4）要的「浏览回注记忆」缺的正是这一层。另：口袋视图从实时工具注册表算，工具注册即算「有」，凭据缺失也会显示存在（2026-11-05 web_search 事故即此类），身体插件须自带可用性自检 |
+| ISS-043 | 「上网」按模型 token 扣额度（官方 `web_search` 的固有成本） | P1 | `fixed` | 用户质疑「又不是调大模型」。**实测确认它确实是模型调用**：请求体 `messages` + `model: deepseek-v4-flash` + `tools:[{type:web_search_20250305}]`，`usage.input_tokens 9804 / output_tokens 867`，10 条结果、4.7s——9804 个输入 token 主要是搜回的网页正文，符合形态而非插件开销。**处置**：`runtime/dsh-web-search-account` 新增免模型通道（`free-search.js` 抓 `cn.bing.com/search` 解析 `li.b_algo`，150–330ms、0 token），`mode` 默认 `free-first`（免费优先、解析不出才回退账号通道），`free-only` 可禁绝任何花费。零成本上网的另一条路是 `web_fetch`（代码里 `llm`/`messages`/`anthropic` 零命中）。**待评估**：npm 生态已有成熟第三方插件（`@fffangchenghao/dsh-web-search` 0.24.2 免 key 8 引擎 + RRF + 系统代理，`engines.dsh` 覆盖本机 0.2.1-rc.5），是否换用以多引擎换取解析稳定性，待用户拍板 |
 
 ---
 
@@ -254,9 +256,9 @@
 | `partial` | 3 |
 | `deferred` | 3 |
 | `wontfix` | 3 |
-| `fixed` | 13 |
+| `fixed` | 14 |
 | `invalid` | 4 |
-| **合计** | **46**（42 条有效 + 4 条误诊留档） |
+| **合计** | **47**（43 条有效 + 4 条误诊留档） |
 
 **按这个清单，接下来最该做的三件事（顺序）**
 
@@ -274,3 +276,4 @@
 | 2026-11-05 | v1.1 | ISS-021 关闭：能力台账补 6 条施工单元（29→35 项），审计脚本新增 `scripts/*.mjs` 与 `package.json` 扫描面 |
 | 2026-11-05 | v1.2 | ISS-027 关闭：0.5.5 部署到运行 profile（29 模块 / `shadow/` 落盘 / 注入仍走旧路径）。统计 `open` 16→15、`fixed` 12→13；优先级表去掉部署项，补 ISS-007 |
 | 2026-11-05 | v1.3 | 新增 ISS-042（`tool_output` 零写入方，浏览经历不进记忆）；ISS-015 补范围确认「身体包含浏览网页」。统计 `open` 15→16、合计 45→46 |
+| 2026-11-05 | v1.4 | 新增 ISS-043（官方 `web_search` 按 token 扣额度 → 已改默认免模型通道），附第三方插件调研结论待拍板；症状索引修正一处条号误引（ISS-042→ISS-027）。统计 `fixed` 13→14、合计 46→47 |

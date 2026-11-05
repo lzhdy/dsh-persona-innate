@@ -16,7 +16,7 @@
  *   3. 打印验证与重启提示
  */
 
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -24,6 +24,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECK_ONLY = process.argv.includes('--check');
+
+/** 要部署的文件：package.json + 插件自身的 .js（free-search.js 等模块必须一起过去）。 */
+const SOURCES = ['package.json', ...(await readdir(HERE)).filter((f) => f.endsWith('.js')).sort()];
 
 const dshHome = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME.trim() : join(homedir(), '.dsh');
 const profileDir = join(dshHome, 'profiles', 'web');
@@ -39,9 +42,11 @@ const PATCH_BLOCK = `
 #   LM Studio 本地模型（provider = llama-local），于是账号登录着也用不上，回退去要
 #   DEEPSEEK_API_KEY，而它从未配置过。
 # 处置：本地 provider（node_modules/dsh-web-search-account）复用官方
-#   DeepSeekSearchProvider，只把取令牌改成直接问 deepseekAccount 服务要。
+#   DeepSeekSearchProvider，只把取令牌改成直接问 deepseekAccount 服务要；
+#   并把默认通道换成「免模型搜索」（抓 Bing 结果页自己解析，零 token）。
 #   不改任何官方文件，官方插件升级不会覆盖。
-# 代价：搜索走该账号自身额度，与「用 DeepSeek Account 模型时」同源。
+# 成本：默认 mode=free-first 不花额度；解析不出结果才回退账号通道（一次模型调用）。
+#   要恢复官方行为：改成 mode: 'account'；要禁止任何花钱：mode: 'free-only'。
 # ⚠ 新增插件必须用 insert: 形式；直接写 - id:/name: 会被当成「覆盖已有条目」并报 entry not found。
 - insert:
     - id: web-search-account
@@ -69,13 +74,13 @@ console.log(`profile：${profileDir}`);
 console.log(`patch  ：insert 条目 ${hasInsert ? '已在' : '缺失'}；searchProvider 覆盖 ${hasOverride ? '已在' : '缺失'}`);
 
 if (CHECK_ONLY) {
-  const deployed = existsSync(join(targetDir, 'index.js'));
-  console.log(`部署  ：${deployed ? '已就位' : '未就位（运行不带 --check 的脚本即可）'}`);
-  process.exit(hasInsert && hasOverride && deployed ? 0 : 1);
+  const missing = SOURCES.filter((file) => !existsSync(join(targetDir, file)));
+  console.log(`部署  ：${missing.length === 0 ? '已就位' : `未就位（缺 ${missing.join(', ')}；运行不带 --check 的脚本即可）`}`);
+  process.exit(hasInsert && hasOverride && missing.length === 0 ? 0 : 1);
 }
 
 await mkdir(targetDir, { recursive: true });
-for (const file of ['package.json', 'index.js']) {
+for (const file of SOURCES) {
   await copyFile(join(HERE, file), join(targetDir, file));
   console.log(`✓ 已写入 ${join(targetDir, file)}`);
 }
@@ -105,6 +110,8 @@ console.log(`
   1. 重启 dsh（双击桌面 start-dsh-logged.bat；先确认 3080 没在监听）
   2. 验证：node runtime/dsh-web-search-account/deploy.mjs --check
   3. 看证据：cat ~/.dsh/logs/web-search-account.log
-     期望看到 {"event":"registered",...,"accountToken":"ok"}
-     当天首次启动还会有一条 {"event":"boot-search","sources":N}（每天最多一次）
+     期望看到 {"event":"registered",...,"mode":"free-first","accountToken":"ok"}
+     紧跟一条 {"event":"boot-free-search","sources":N}（免费通道自检，不消耗额度）
+     之后每次真实搜索是 {"event":"search-free","sources":N,"ms":N}（零 token）
+     若出现 {"event":"search-free-empty"} 或 {"event":"search","sources":N}，说明这次走了付费兜底
 `);

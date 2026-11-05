@@ -1,8 +1,8 @@
 {
   "name": "dsh-web-search-account",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "让 dsh 的 web_search 用 DeepSeek 账号登录态鉴权，而不是要求 DEEPSEEK_API_KEY（本机跑本地模型时的必要补丁）",
+  "description": "让 dsh 的 web_search 默认不花额度（免模型抓结果页），并修复官方包的账号鉴权门禁（本机跑本地模型时的必要补丁）",
   "type": "module",
   "main": "index.js",
   "exports": {
