@@ -9,6 +9,10 @@
         sampleRounds: 6
         # 每轮注入最近记忆条数上限
         injectLimit: 5
+        # P4 装配器切读开关：false = 走旧注入路径 + 装配器只 shadow 观测（默认）
+        # 切 true 的前置条件见 docs/issue-register.md ISS-006：shadow 跑够 ≥14 天或 ≥30 轮、
+        # 且注入差异指标达标。切读前不要改成 true——shadow 数据不足就切等于拿她的记忆做实验。
+        useIntentAssembler: false
         # 指令性内容剥离：命中即拒绝写入并记录 stripped
         stripDirectives: true
         # M1：self_model 保留最近 N 版（回滚窗口）

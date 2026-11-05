@@ -1,6 +1,6 @@
 # dsh-persona-innate（DSH 自主成长型拟人陪伴插件）
 
-不注入角色卡 / 人设，人格、记忆、情感、自我认知全部由 AI 在与用户的真实相处中自己长出来。当前运行时版本 **0.5.4**；总设计文档已升格为 **v1.0.0**（整合记忆架构 v1.1 重设计 + 第二轮评审五项增量 + P0–P4 施工现状），见 `docs/mechanism-design.md`——这是**唯一总设计文档**，对应其中「里程碑与验收」章节的 M0/M1/M2/M3 行。已知问题与观察期留档见 `docs/issue-register.md`（41 条有效条目 + 4 条误诊留档）。
+不注入角色卡 / 人设，人格、记忆、情感、自我认知全部由 AI 在与用户的真实相处中自己长出来。当前运行时版本 **0.5.5**（2026-11-05 已部署到运行 profile）；总设计文档已升格为 **v1.0.0**（整合记忆架构 v1.1 重设计 + 第二轮评审五项增量 + P0–P4 施工现状），见 `docs/mechanism-design.md`——这是**唯一总设计文档**，对应其中「里程碑与验收」章节的 M0/M1/M2/M3 行。已知问题与观察期留档见 `docs/issue-register.md`（41 条有效条目 + 4 条误诊留档）。
 
 ## 设计理念 · 开发准则（最高优先 · 每次改动必须核对）
 
@@ -158,7 +158,11 @@
 - **src/self-model.ts**：版本化自我叙事（存在论锚点、证据追溯、保留 10 版、成长档案）。
 - **src/state.ts**：状态机（open/focused/guarded 三模式、acquaintance→intimate 阶段）。
 - **src/eval.ts**：漂移审计、长程一致性、诚实基线。
-- **src/index.ts**：接线（session/event 双通道、注入 provider、命令注册、复盘调度与启动补跑）。
+- **src/index.ts**：接线（session/event 双通道、注入 provider、命令注册、复盘调度与启动补跑、P1 旁路捕获、P4 shadow）。
+- **src/raw-turn.ts / raw-turn-log.ts**（P1）：raw_turns 原始层——每条话轮最先落盘的 append-only 日志（`raw-turns/YYYY-MM.jsonl`）。只写不读，删除 `raw-turns/` 即物理回滚。
+- **src/promotion.ts**（P2）：self_model 晋升闸门（≥3 独立证据组 / ≥2 会话 / ≥1 非 AI 独白 / 无未解反证），不达标留 candidate。
+- **src/procedures.ts / procedure-promotion.ts**（增量1）：程序性记忆层。只能从多次复盘里长出来，不提供写入通道；默认 candidate。
+- **src/intent.ts / assembler.ts**（P4）：按意图装配器——意图解析 + 纯函数装配（零 LLM），当前只 shadow 观测，`useIntentAssembler=false` 时不改注入。
 
 ## 配置项（Config，全部 .default()）
 
@@ -167,6 +171,7 @@
 | dataDir | 未设置（自动定位） | 数据目录；未设置时自动解析为 `$DSH_HOME/persona-innate`（默认 `~/.dsh/persona-innate`），显式值支持 `~` 展开；空字符串视为未设置并告警回退 |
 | sampleRounds | `6` | 先天画像采样轮数（M0） |
 | injectLimit | `5` | 注入槽位名额（五槽装配的 `N`；实际条数受槽位与字符预算约束） |
+| useIntentAssembler | `false` | P4 切读开关。`false` = 走旧 `buildInjection`、装配器只写 `shadow/`；切 `true` 的前置条件见 `docs/issue-register.md` ISS-006 |
 | stripDirectives | `true` | 指令性内容剥离开关 |
 | model | `''` | 画像采样模型名（空则自动探测） |
 | selfModelHistoryLimit | `10` | self_model 保留最近 N 版 |
@@ -179,16 +184,21 @@
 ## 用法
 
 ```bash
-# 构建 + 全量测试
-npm run build && node --test tests/*.test.mjs   # 214/214 通过
+# 构建 + 全量测试 + 台账校验
+npm run build && node --test tests/*.test.mjs   # 337/337 通过
+npm run audit                                   # 台账 35 项：15 项 done 均有调用点
 
 # 打包并装入 DSH profile
 npm pack
-dsh plugin --profile web add dsh-persona-innate-0.5.3.tgz
+dsh plugin --profile web add dsh-persona-innate-0.5.5.tgz
 dsh --profile web --dump-config
 ```
 
-> 坑：pnpm 对**同版本号**的 tgz 会复用旧包（`resolved reused`），改代码后必须 bump 版本号再 pack，否则装了也不生效。
+> 坑一：pnpm 对**同版本号**的 tgz 会复用旧包（`resolved reused`），改代码后必须 bump 版本号再 pack，否则装了也不生效。
+>
+> 坑二：网络不通时的部署退路是**直拷**——`lib/` + `package.json` + `cordis.patch.yml` 覆盖到 `~/.dsh/profiles/web/node_modules/dsh-persona-innate/`，效果等价（0.5.4 与 0.5.5 都走过这条路）。
+>
+> 坑三：**重启别用 `Start-Process`**——那样拉起的进程挂在本会话的 Job Object 下，会话结束就被 kill。用桌面的 `start-dsh-logged.bat`（日志写到 `~/.dsh/logs/console.log`）。
 
 用户侧命令：
 
