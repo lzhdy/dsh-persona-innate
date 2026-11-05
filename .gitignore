@@ -6,3 +6,5 @@ persona-innate/
 .DS_Store
 test-out.txt
 *.tmp
+# Phase 0 的人格记忆数据备份（敏感数据，不入库）
+backup/
