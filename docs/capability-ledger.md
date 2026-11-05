@@ -23,7 +23,7 @@
 |---|---|---|---|---|
 | M0 | events 记忆（按月分片追加） | ✅ 已实现 | ✅ 有调用点 | events/YYYY-MM.jsonl，写入 O(1) |
 | M0 | provenance 显著性权重（提不提） | ✅ 已实现 | ✅ 有调用点 | 七类来源枚举 + 显著性权重已接线（v0.5 起 recall 用 SALIENCE_WEIGHT，不再用 PROVENANCE_WEIGHT） |
-| M0 预留 | provenance 可信度权重（能不能当事实） | 🟡 半接 | — | PROVENANCE_WEIGHT 只被 provenance.ts 内的 recallScore() 消费，而 recallScore 生产零调用（唯一调用点 tests/m0.test.mjs:190）。保留原因：它仍是"可信度"口径的规范定义，且 m1-code-api-spec.md 有 API 记录；要么接进留存/归档路径，要么在下次评审时删掉，不要一直挂着当门面 |
+| M0 预留 | provenance 可信度权重（能不能当事实） | 🟡 半接 | — | PROVENANCE_WEIGHT 只被 provenance.ts 内的 recallScore() 消费，而 recallScore 生产零调用（唯一调用点 tests/m0.test.mjs:190）。保留原因：它仍是"可信度"口径的规范定义，且机制设计文档 v1.0.0 有 API 记录；要么接进留存/归档路径，要么在下次评审时删掉，不要一直挂着当门面 |
 | M0 | 每轮记忆注入（五槽装配） | ✅ 已实现 | ✅ 有调用点 | order 150 |
 | M0 | 先天画像采样 | ✅ 已实现 | ✅ 有调用点 |  |
 | M1 | 每日复盘（游标协议） | ✅ 已实现 | ✅ 有调用点 | 0.5.2 修首次死锁；窗口 = 时刻区间 |
@@ -48,7 +48,7 @@
 | M4 | 身体协议（Body Protocol） | ❌ 零实现 | — | 文档 §身体 有完整设计；没有任何能力插件能回报经历 |
 | M4 | 权限中心 | ❌ 零实现 | — |  |
 | M5 | 内容平台（视频/评论） | ❌ 零实现 | — |  |
-| M6 | 社交 IM（QQ） | 🟡 半接 | — | 2026-11-04 运行期打通：官方 0.5.5 + 私聊 allowlist + 群聊 disabled，QQ 收发正常，persona 四个注入块确实到达 QQ 会话（用 session.v4.jsonl.zstd 逐帧解压验证）。仍是 partial：身体级实现（经历回报/initiation）需自研，见 docs/im-channel-evaluation.md |
+| M6 | 社交 IM（QQ） | 🟡 半接 | — | 2026-11-04 运行期打通：官方 0.5.5 + 私聊 allowlist + 群聊 disabled，QQ 收发正常，persona 四个注入块确实到达 QQ 会话（用 session.v4.jsonl.zstd 逐帧解压验证）。仍是 partial：身体级实现（经历回报/initiation）需自研，见机制设计文档 v1.0.0 §身体 |
 | M7 | 本地应用插件 | ❌ 零实现 | — |  |
 
 合计 29 项：已实现 10 · 半接 9 · 零实现 10。

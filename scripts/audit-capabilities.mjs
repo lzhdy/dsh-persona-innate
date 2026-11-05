@@ -79,7 +79,7 @@ const ITEMS = [
     witnesses: [
       { label: 'recallScore(...)', pattern: 'recallScore\\(', definedIn: 'provenance.ts', expectIn: [] },
     ],
-    note: 'PROVENANCE_WEIGHT 只被 provenance.ts 内的 recallScore() 消费，而 recallScore 生产零调用（唯一调用点 tests/m0.test.mjs:190）。保留原因：它仍是"可信度"口径的规范定义，且 m1-code-api-spec.md 有 API 记录；要么接进留存/归档路径，要么在下次评审时删掉，不要一直挂着当门面',
+    note: 'PROVENANCE_WEIGHT 只被 provenance.ts 内的 recallScore() 消费，而 recallScore 生产零调用（唯一调用点 tests/m0.test.mjs:190）。保留原因：它仍是"可信度"口径的规范定义，且机制设计文档 v1.0.0 有 API 记录；要么接进留存/归档路径，要么在下次评审时删掉，不要一直挂着当门面',
   },
   {
     id: 'M0-inject-memory',
@@ -323,7 +323,7 @@ const ITEMS = [
     milestone: 'M6',
     status: 'partial',
     witnesses: [{ label: 'IM 通道', pattern: 'qqbot|qq-bridge|imChannel', definedIn: '__none__', expectIn: [] }],
-    note: '2026-11-04 运行期打通：官方 0.5.5 + 私聊 allowlist + 群聊 disabled，QQ 收发正常，persona 四个注入块确实到达 QQ 会话（用 session.v4.jsonl.zstd 逐帧解压验证）。仍是 partial：身体级实现（经历回报/initiation）需自研，见 docs/im-channel-evaluation.md',
+    note: '2026-11-04 运行期打通：官方 0.5.5 + 私聊 allowlist + 群聊 disabled，QQ 收发正常，persona 四个注入块确实到达 QQ 会话（用 session.v4.jsonl.zstd 逐帧解压验证）。仍是 partial：身体级实现（经历回报/initiation）需自研，见机制设计文档 v1.0.0 §身体',
   },
   {
     id: 'M7-local-app',
