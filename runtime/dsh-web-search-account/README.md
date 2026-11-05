@@ -1,5 +1,14 @@
 # dsh-web-search-account
 
+> **2026-11-05 现状：这个插件的搜索通道已不是主路由。**
+> 线上 `web.searchProvider` 现在指向第三方包 `@fffangchenghao/dsh-web-search` 的 `bing`
+> （八引擎直抓 + RRF 融合，免 key、零 token）。本插件保留作**回滚路径**与**账号鉴权修复**：
+>
+> - 切回它：`cordis.patch.yml` 里 `searchProvider: deepseek-search-account`（一行）
+> - 切回官方：`searchProvider: deepseek-official`（会重新要求 `DEEPSEEK_API_KEY`）
+>
+> 切换理由与审计结论见 `docs/issue-register.md` 的 ISS-043。下面保留本插件自身的完整说明。
+
 让 DSH 的 `web_search` **默认不花额度**，同时修掉官方包的账号鉴权门禁。
 
 两件事，一件讲成本，一件讲鉴权。
