@@ -301,6 +301,73 @@ test('run 集成：泛化特质与 reflectSelf traits 去重合并进 candidateT
   );
 });
 
+/* ── 7. 边界 A：promote=true 且 diff.traits 为空时，泛化特质仍落 candidate ── */
+
+test('run 集成·边界A：promote=true 且 reflectSelf 无 traits 时，泛化特质仍落 candidateTraits', async () => {
+  const store = await freshStore();
+  const selfModel = makeSelfModelStub(null);
+  const llm = new MockLlm([
+    {
+      match: '提炼语义事实',
+      respond: JSON.stringify({
+        facts: [
+          { type: 'self', content: '我会先澄清', sourceEventIds: ['ev_a'], confidence: 0.6 },
+          { type: 'self', content: '我会再展开', sourceEventIds: ['ev_b'], confidence: 0.6 },
+        ],
+      }),
+    },
+    {
+      match: '归纳出你的稳定特质',
+      respond: (input) => {
+        const ids = [...input.prompt.matchAll(/^- \[([^\]]+)\]/gm)].map((m) => m[1]);
+        return JSON.stringify({
+          traits: [{ trait: '泛化特质', sourceFactIds: ids.slice(0, 2) }],
+        });
+      },
+    },
+    {
+      // reflectSelf 不产 traits → diff.traits = []，触发边界 A（仅泛化特质非空）
+      match: '反思自己的行为与表达',
+      respond: JSON.stringify({ traits: [], preferences: [], speakingStyle: '', narrative: '' }),
+    },
+    {
+      match: '更新对这段关系的认知',
+      respond: JSON.stringify({ relationshipView: '' }),
+    },
+    {
+      match: '派生两类记忆',
+      respond: JSON.stringify({ threads: [], attributes: [] }),
+    },
+    {
+      match: '你自己遇到什么情况',
+      respond: JSON.stringify({ procedures: [] }),
+    },
+  ]);
+
+  const engine = new DailyReviewEngine({ llm, selfModel, state: makeStateStub(), store });
+  const events = [
+    { id: 'ev_a', time: '2026-11-01T10:00:00.000Z', topic: '用户-分享', summary: '分享', emotionTags: [], importance: 0.7, provenance: 'user_direct', lastRetrieved: null },
+    { id: 'ev_b', time: '2026-11-02T11:00:00.000Z', topic: '自身-表达', summary: '表达', emotionTags: [], importance: 0.7, provenance: 'self_direct', lastRetrieved: null },
+  ];
+  const out = await engine.run({
+    date: '2026-11-02',
+    events,
+    allEvents: events,
+    selfModel: await selfModel.load(),
+    state: null,
+    feedback: [],
+  });
+
+  assert.equal(out.promotion?.decision.promote, true, 'user_direct + 跨 2 日期 → 命中边界 A 的 promote=true 分支');
+
+  const snap = await selfModel.load();
+  assert.ok(snap.candidateTraits.includes('泛化特质'), '修复后泛化特质落 candidate，不被吞');
+  assert.ok(
+    !(snap.traits ?? []).includes('泛化特质'),
+    '泛化特质不直接进 stable',
+  );
+});
+
 test('GENERALIZE_PROMPT：中文模板且要求 JSON 输出、禁止祈使句', () => {
   assert.ok(typeof GENERALIZE_PROMPT === 'string' && GENERALIZE_PROMPT.length > 20);
   assert.ok(GENERALIZE_PROMPT.includes('JSON'));
