@@ -1,6 +1,6 @@
 # 问题记录清单（Issue Register）
 
-**版本**：v1.13 · 日期：2026-11-06（条目 61 条：57 条有效 + 4 条误诊留档）
+**版本**：v1.14 · 日期：2026-11-06（条目 63 条：59 条有效 + 4 条误诊留档）
 **配套文档**：`README.md`（使用说明）、`docs/mechanism-design.md`（唯一总设计文档 v1.0.0）、`docs/capability-ledger.md`（`npm run audit --write` 自动生成的能力台账）
 
 ---
@@ -67,6 +67,8 @@
 | 她只回了一个「我」字就没了，像人格坏了 | ISS-056 | `open`：上下文打满，输出退化到 1 个 token（`stopReason=length`），是容量问题不是人格问题 |
 | 她性格说得挺准，具体事却说不清 | ISS-055 | `open`：`self_model` 每轮全量注入 15 条，事件只取 5 条；`attributes`/`procedures` 零注入 |
 | 她记得自己答应过什么，却不记得我授权过什么 | ISS-053 | `open`：AI 回复走 `extractSelfExpression` 命中率高，用户消息走规则白名单，命中率仅 13.5% |
+| 工具 `persona_note` 报「执行失败」，可内容好像又记住了 | ISS-058 | **已修（0.5.7）**：成功时返回值带 `reason: undefined` 被判非法 JSON，属假失败，事件其实已落库 |
+| 她说「Updated memory for topic 共同记忆」，可问她内容却答不出 | ISS-059 | `open`：那是模型自己编的通知文本（无 tool-call、无写入），不是插件或 UI 的输出 |
 
 ---
 
@@ -160,6 +162,8 @@
 | ISS-055 | `attributes`(6 条) 与 `procedures`(5 条) 实现完整但**零注入**：记下来了，说不出来 | P2 | `open` | **2026-11-06 核对**：生产注入只有四块（`index.ts:1237/1244/1251/1258`：记忆 / 对话上下文 / 状态 / 自我模型），`buildInjection` 只读 `events` + `openThreads` + `selfModel`。`loadAttributes` 的生产调用点只有 `index.ts:615`（P4 shadow 内部）、`index.ts:1550`（`/persona` 命令展示）、`review.ts:304`（复盘输入）——**没有一处是注入**；`procedures` 在 `src/index.ts` 零命中。**后果**：她已归纳出 `ai工具交互偏好 = 用户曾调试并赋予 AI 上网搜索工具（web_tools）`（证据 3 条）、`对话风格偏好 = 反感分点总结，喜欢朋友式闲聊`（证据 3 条），但这些句子永远不进 prompt——表现为"性格对、细节空"。**关联**：ISS-006 只讲装配器切读，本条是切读之后仍会漏的两层。 |
 | ISS-056 | **上下文打满时整条回复退化为 1 个 token**：dsh 无自动压缩、无 `max_tokens` 兜底 | P0 | `open` | **2026-11-06 09:20 实锤**（QQ 会话 `session-9f9ca4b1`）：`turn 17 step 4` 的 `assistant/message` 原文就是一个"我"，`replayState.response.stopReason = "length"`，`turn/end` 记 `{kind:"max-tokens"}`。**配置**：`~/.dsh/profiles/web/cordis.patch.yml:16` `contextWindow: 32768`；LM Studio `/api/v0/models` 实测 `loaded_ctx = 33024`，而模型 `qwen3.6-35b-a3b` 支持 **262144**（只开了 1/8）。**估算该轮 prompt ≈ 3.5–3.7 万 token**：41 个工具 schema 约 10.5k（28%，每轮固定开销）、对话正文约 24.7k、system 1.8k、人格注入仅 1.1k（3%——**不是人格插件撑大的**）。**机制**：`dsh-agent-loop` 的 `maxTokens` 取 agent 选项、不按 `contextWindow − prompt` 计算；未配则请求不带 `max_tokens`，llama.cpp 一路生成到窗口耗尽，只剩 1 个 token 的位置就吐一个字。该包内**无上下文压缩**（`compact` 均指事件流压平），会话纯累加 → 撞墙是必然。**与 ISS-045 同源**：ISS-045 是"该压缩却没压缩"，本条是"没压缩之后的可见后果"。**影响**：用户会读成"人格坏了 / 记忆坏了"。**修法**：① LM Studio n_ctx 提到 65536/131072 并同步改 `contextWindow`（两数必须一致）；② 裁工具面（41 → 十余个，QQ 陪伴用不到 read/write/grep/bash）；③ 给 `max_tokens` 兜底，至少不要退化成 1 个字。 |
 | ISS-057 | `raw_turns` 原文层（112 条）建好未接线：只写不读，生产注入拿不到 | P2 | `deferred` | **2026-11-06 核对**：`raw-turns/2026-11.jsonl` 已有 112 条（user 37 / assistant 47 / tool 28），是唯一全量无遗漏的一层。`index.ts:1124` 注释写明"只写不读，切读留到 P4 装配器"；唯一读取点 `index.ts:618` 在 `assembleInjection` 内，而 `refreshInjection` 只在 `useIntentAssembler = true`（`:575`，默认 `false` 见 `:109`）时用它当注入，否则只写 `shadow/assembler-*.jsonl` 观测。**这不是缺陷而是分期**：P1 规格刻意只写不读，P4 刻意只 shadow，为的是一次只改一件事、出问题能归因。**切读前置**：ISS-019（goldset 能跑出数）+ ISS-054（预算分配先定）。**关联**：ISS-006。 |
+| ISS-058 | `persona_note` **成功即报错**：返回值带 `reason: undefined`，被判非法「无损 JSON」→ **已修** | P1 | `fixed` | **2026-11-06 用户贴图**（"工具 persona_note 执行失败 ToolOutputError: INVALID_TOOL_OUTPUT"）后定位：QQ 会话 `session-87fee499` turn 4 step 1 的 tool result 原文是 `Error: tool "persona_note" returned invalid output: value is not lossless JSON`。**根因**：`AddResult.reason` 是可选字段（`memory.ts:37`），**成功时正是 `undefined`**；而 `execute` 无条件把它带进返回值（原 `index.ts:1333` `return { ok: !res.rejected, reason: res.reason }`）。我实测 dsh 的判定：`isJsonValue({ok:true, reason:undefined}) === false`、`isJsonValue({ok:true}) === true` → 失败的不是写入，是**返回值形状**。**假失败的副作用**：`memory.addEvent` 在输出校验之前就已执行，事件确实落库（`events/2026-11.jsonl` 11-06T08:02Z `topic=用户要求 / provenance=inferred`），但用户看到"执行失败"。**修法**：成功分支省略 `reason` 键；`tests/assembly.test.mjs` 补断言（`reason` 键不得存在 + 每个字段不得为 `undefined`）。**变异验证**：把旧写法植回 `lib/index.js` 后单跑该测试 → `# fail 1`，报错正是"persona_note 返回字段 reason 不能是 undefined"。**这意味着修之前 persona_note 只有"写入失败"这条路径不报错——一成功就报错。** |
+| ISS-059 | **模型伪造工具执行结果**：她发 `[Persona recall updated] 📍 Updated memory for topic 共同记忆`，但记忆没有写入 | P1 | `open` | **2026-11-06 用户贴图**（"这个是什么情况"）后查证：`session-87fee499` 的 seq 215 是一条**纯文本 assistant 消息**（`content:[{type:'text'}]`、`stopReason="stop"`、`outputTokens=16`、**无 tool-call**），不是工具调用、不是插件输出、不是 UI 提示——**仓库与 dsh 全部包里搜这句文案零命中**；且 `events/2026-11.jsonl` 中 `共同记忆` **0 条**，证明记忆根本没写。**归因**：① 上一轮 `persona_note` 刚好失败（ISS-058），她手里没有"成功回执"的样板；② 文案里混用了 `Persona recall`（读工具名）而不是 `persona_note`（写工具名）——生成痕迹，不是回显；③ 同会话 turn 10–12、15–19 的回复原文就是 `...`（3 字 / `outputTokens=2` / `stopReason="stop"`，**不是被截断**），而那一段 `inputTokens` 从 24144 一路涨到 32226（窗口 32768），属长上下文压力下的退化，且一旦上下文里出现几次 `...` 会自我强化。**影响**：比工具报错更危险——用户会以为记住了，其实没有；这是"信任被假信号消耗"。**修法（待拍板）**：① 先修 ISS-058 让工具真的可用（已修）；② 旁路观测层加一个**只计数不改写**的检测：assistant 文本形如 `[Xxx updated]` 但同轮无 tool-call 时计数告警（符合理念 4"旁路不拦截，只追加"）；③ 根本仍是 ISS-056 的容量。 |
 
 ---
 
@@ -275,14 +279,14 @@
 
 | 状态 | 数量 |
 |---|---|
-| `open` | 27 |
+| `open` | 28 |
 | `observing` | 5 |
 | `partial` | 3 |
 | `deferred` | 4 |
 | `wontfix` | 3 |
-| `fixed` | 15 |
+| `fixed` | 16 |
 | `invalid` | 4 |
-| **合计** | **61**（57 条有效 + 4 条误诊留档） |
+| **合计** | **63**（59 条有效 + 4 条误诊留档） |
 
 **按这个清单，接下来最该做的五件事（顺序）**
 
@@ -314,3 +318,4 @@
 | 2026-11-06 | v1.11 | 新增 **ISS-048**（特质晋升闸门是单向棘轮）：08:09 复盘 3 条候选全被「仅跨单个日期」隔离，查证发现 `reflectEvents` 是窗口内事件、且泛化产物在 `review.ts:546` 被 `map(g => g.trait)` 丢掉 `sourceEventIds`，跨日证据根本传不到闸门；对照 `procedure-promotion.ts` 用的是全量 `eventTimes`，写法正确。统计 `open` 19→20、合计 51→52 |
 | 2026-11-06 | v1.12 | **ISS-048 关闭**：晋升闸门改为逐候选按自身累积证据判定（commit `9a62927`，349 条测试全绿，QA 19 条断言含装配级变异敏感测试），0.5.6 已部署到运行 profile。同批新增 QA 在验证中发现的 4 条非阻塞缺陷：ISS-049（每轮净增 2 版，回滚窗口约 5 天）、ISS-050（`consistencyCheck` 只写不读 + 审计未见证晋升函数）、ISS-051（证据读失败与已归档同文案）、ISS-052（候选池无 TTL）。统计 `open` 20→23、`fixed` 14→15、合计 52→56 |
 | 2026-11-06 | v1.13 | **用户提出"记忆该像人一样分四档衰减"后做全链路溯源，新增 5 条**：ISS-053 提取入口是白名单式规则（37 条用户消息仅 5 条入库 = 13.5%，静默丢弃无日志；新增 `scripts/audit-extraction.mjs` 可重跑复现，`npm run audit:extract`）；**同时更正 v1.11 前"用户消息→事件 35%"的口径错误**（分子含 8 条 P1 上线前事件，与分母不同期）；ISS-054 读取端固定 5 条 / 700 字且 `importance` 写入后永不更新 → 四档记忆零机制承载；ISS-055 `attributes`/`procedures` 零注入（"记下来了，说不出来"）；ISS-056 上下文打满时整条回复退化为 1 个 token（QQ 会话实锤 `stopReason=length`，窗口声明 32768 / LM Studio 实开 33024 / 模型支持 262144）；ISS-057 `raw_turns` 建好未接线（`deferred`，设计分期非缺陷）。优先级表由 3 项重排为 5 项，ISS-053 置顶。统计 `open` 23→27、`deferred` 3→4、合计 56→61 |
+| 2026-11-06 | v1.14 | **用户贴 QQ 截图问「persona_note 为什么用不了」与「[Persona recall updated] 是什么情况」，查出两条**：① **ISS-058（已修）`persona_note` 成功即报错**——返回值带 `reason: undefined` 被 dsh 判非法「无损 JSON」（实测 `isJsonValue({ok:true, reason:undefined}) === false`），而 `addEvent` 在校验前已执行，所以是**假失败、记忆其实写了**；修法为成功分支省略该键，补装配级断言，并做变异验证（植回旧写法 → `# fail 1`）。② **ISS-059（open）模型伪造工具执行结果**——`[Persona recall updated] 📍 Updated memory for topic 共同记忆` 是一段纯生成文本（无 tool-call、`outputTokens=16`），仓库与 dsh 全部包内零命中，事件库 `共同记忆` 0 条；同段还伴随 `...` 式退化回复与 `inputTokens` 逼近 32k。统计 `open` 27→28、`fixed` 15→16、合计 61→63。**同时记下一条通用教训：工具输出只测失败路径，会漏掉成功路径** |

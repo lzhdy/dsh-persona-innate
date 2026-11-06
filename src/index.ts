@@ -1330,7 +1330,12 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
           ok: !res.rejected,
           reason: res.reason,
         });
-        return { ok: !res.rejected, reason: res.reason };
+        // ISS-058：输出校验要求「无损 JSON」——值为 undefined 的键会让 isJsonValue 判 false。
+        // 而 `reason` 是可选字段，**成功时正是 undefined**，于是「写入成功」反而被报成
+        // ToolOutputError（用户看到"工具执行失败"，事件其实已落库）。成功分支必须不带该键。
+        const out: { ok: boolean; reason?: string } = { ok: !res.rejected };
+        if (res.reason !== undefined) out.reason = res.reason;
+        return out;
       },
     }),
   );

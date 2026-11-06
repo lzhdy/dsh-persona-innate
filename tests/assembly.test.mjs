@@ -101,6 +101,22 @@ test('装配：插件在 Cordis 运行时中正确激活', async () => {
   const { text } = await mem.buildInjection(3);
   assert.ok(text.includes('手冲咖啡'));
 
+  // ISS-058：persona_note 的返回值必须是「无损 JSON」。
+  // dsh 的 isJsonValue 遇到值为 undefined 的键判 false，会把**成功的写入**报成
+  // ToolOutputError（用户看到"工具执行失败"，事件其实已落库）。
+  // 这条断言的意义：成功路径必须不带 reason 键——只测失败路径会漏掉它。
+  const noteTool = registeredTools.find((t) => t.name === 'persona_note');
+  assert.ok(noteTool && typeof noteTool.execute === 'function', 'persona_note 应可执行');
+  const noteOut = await noteTool.execute(
+    { topic: '测试-写入', summary: '一条用于校验返回值的记录', importance: 0.5 },
+    {},
+  );
+  for (const [k, v] of Object.entries(noteOut)) {
+    assert.notStrictEqual(v, undefined, `persona_note 返回字段 ${k} 不能是 undefined（无损 JSON 要求）`);
+  }
+  assert.equal(noteOut.ok, true, '正常写入应返回 ok:true');
+  assert.equal('reason' in noteOut, false, '成功时不应带 reason 键');
+
   await fiber.dispose();
 });
 
