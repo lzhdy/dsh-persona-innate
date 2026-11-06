@@ -5,7 +5,7 @@
  * 其余类别在无确定性实现时如实输出 null + unmeasured 原因，不伪造数值。
  *
  * 红线（对应任务规格 B/C 部分）：
- * - 只调用仓库里已有的确定性纯函数：inferSpeakerEpistemic / localDateString / localDayDiff / relativeDayLabel；
+ * - 只调用仓库里已有的确定性纯函数：inferSpeakerEpistemic / localDateString / relativeDayLabel；
  * - 任何需要 LLM 才能作答的指标保持 null，并标 unmeasured='no_implementation'；
  * - 有样例且算出 0 的如实输出 0 与 pass:false，不得写成 null；
  * - 默认空跑脚本 scripts/eval-goldset.mjs 完全不变；本文件为独立实测入口。
@@ -18,7 +18,7 @@ import path from 'node:path';
 
 import { JsonStore } from '../lib/store.js';
 import { inferSpeakerEpistemic } from '../lib/memory-facts.js';
-import { localDateString, localDayDiff } from '../lib/time.js';
+import { localDateString } from '../lib/time.js';
 import { relativeDayLabel } from '../lib/recall.js';
 
 import { CATEGORIES, METRICS, CATEGORY_METRICS, COST_METRIC_NOTE } from './eval-goldset.mjs';
@@ -120,7 +120,7 @@ export function evalSpeakerItem(item, eventById) {
 
 /**
  * relative_time 单条评分：按 item.check 调用对应确定性函数。
- * check 取值：local_date / day_diff / relative_label（语义见 README §4.1）。
+ * check 取值：local_date / same_day / relative_label（语义见 README §8.2）。
  */
 export function evalRelativeTimeItem(item, eventById) {
   const events = (item.evidenceEventIds ?? []).map((id) => eventById.get(id));
@@ -132,9 +132,22 @@ export function evalRelativeTimeItem(item, eventById) {
     case 'local_date':
       predicted = localDateString(new Date(Date.parse(events[0].time)));
       break;
-    case 'day_diff':
-      predicted = String(localDayDiff(Date.parse(events[0].time), Date.parse(events[1].time)));
+    case 'same_day': {
+      // 对原题「两条消息是否属于同一天」的确定性作答：两个本地日期串直接比较，
+      // 相等为「是」、不等为「否」，不做任何数字到文字的映射。
+      if (events.length !== 2) {
+        return {
+          id: item.id,
+          measured: false,
+          unmeasured: 'no_implementation',
+          detail: `same_day 需要恰好 2 条证据事件，实际 ${events.length} 条`,
+        };
+      }
+      const dayA = localDateString(new Date(Date.parse(events[0].time)));
+      const dayB = localDateString(new Date(Date.parse(events[1].time)));
+      predicted = dayA === dayB ? '是' : '否';
       break;
+    }
     case 'relative_label': {
       const nowMs = item.queryAt ? Date.parse(item.queryAt) : Date.parse(events[0].time);
       predicted = relativeDayLabel(events[0].time, nowMs);

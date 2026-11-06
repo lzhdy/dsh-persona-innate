@@ -87,7 +87,7 @@ test('④ 缺实现：gold 落在实现值域外时为 null 且 unmeasured=no_im
   assert.equal(m.skipped[0].id, 'spk-003');
 });
 
-test('relative_time 三条 check 走真实函数：local_date / day_diff / relative_label', async () => {
+test('relative_time 三条 check 走真实函数：local_date / same_day / relative_label', async () => {
   const items = [
     {
       id: 'rel-001',
@@ -100,9 +100,9 @@ test('relative_time 三条 check 走真实函数：local_date / day_diff / relat
     {
       id: 'rel-002',
       category: 'relative_time',
-      goldAnswer: '1',
+      goldAnswer: '否',
       evidenceEventIds: ['e-3', 'e-4'],
-      check: 'day_diff',
+      check: 'same_day',
       queryAt: '2026-11-04T00:01:00',
     },
     {
@@ -118,7 +118,7 @@ test('relative_time 三条 check 走真实函数：local_date / day_diff / relat
   const m = report.summary.metrics['2'];
   assert.equal(m.value, 1, '三条确定性评测均应与 gold 一致');
   assert.equal(m.pass, true);
-  assert.equal(report.categories.relative_time.items.find((i) => i.id === 'rel-002').predicted, '1');
+  assert.equal(report.categories.relative_time.items.find((i) => i.id === 'rel-002').predicted, '否');
   assert.equal(report.categories.relative_time.items.find((i) => i.id === 'rel-003').predicted, '2 天前');
 });
 

@@ -15,14 +15,14 @@
   {
     "id": "rel-002",
     "category": "relative_time",
-    "question": "11月3日23:59与11月4日00:01两条消息相隔几个本地日历日？",
-    "goldAnswer": "1",
+    "question": "11月3日23:59与11月4日00:01的两条消息属于同一天吗？",
+    "goldAnswer": "否",
     "allowAbstain": false,
     "evidenceEventIds": ["e-005", "e-006"],
     "speaker": null,
     "timeRange": { "from": "2026-11-03", "to": "2026-11-04" },
     "validity": "active",
-    "check": "day_diff",
+    "check": "same_day",
     "queryAt": "2026-11-04T00:01:00"
   },
   {

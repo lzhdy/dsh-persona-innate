@@ -143,10 +143,12 @@ live 实测中，`null` 必须可解释——每项附带机器可读的 `unmeas
 |---|---|---|---|
 | speaker | 1 | `src/memory-facts.ts:inferSpeakerEpistemic(provenance).speaker` | `speaker_provenance` |
 | relative_time | 2 | `src/time.ts:localDateString` | `local_date` |
-| relative_time | 2 | `src/time.ts:localDayDiff` | `day_diff` |
+| relative_time | 2 | `src/time.ts:localDateString`（两条事件各取日期后比较是否相等） | `same_day` |
 | relative_time | 2 | `src/recall.ts:relativeDayLabel` | `relative_label` |
 
-评分方式：直接比较「实现输出」与 `goldAnswer` 字符串，不写任何评测专用判定逻辑。
+评分方式：直接比较「实现输出」与 `goldAnswer` 字符串，不写任何评测专用判定逻辑。`same_day` 分支只做两个日期串的相等比较，输出只有「是/否」两个字面量，不存在数字到文字的映射。
+
+> **小样本 caveat（必读）**：当前指标 1 的 `value=1` 建立在 n=2（spk-001/002，spk-003 未测）、指标 2 的 `value=1` 建立在 n=3 的**个位数样本**上。它只证明「评测管线已打通、确定性实现与 gold 对齐」，**不构成准确率证据**，不能读作「speaker 归属准确率 ≥95%」或「相对时间正确率 ≥95%」。样本扩充到每类 20 条后，`value` 才具备统计意义。
 
 ### 8.3 当前仍不可测的项及原因
 
