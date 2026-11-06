@@ -1516,6 +1516,15 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
               .filter(([, n]) => n > 0)
               .map(([k, n]) => `${k} ${n}`)
               .join('、')}）` : ''}；过期收敛 ${mf.expired}${mf.persisted ? '' : '；未写盘'}${mf.error ? `；${mf.error}` : ''}`;
+        // ISS-048：晋升从"整批一刀"改成"逐条过闸"，文案要把两种结局分开说清楚：
+        // 通过几条、隔离几条，全隔离时给出**第一条**的具体理由（逐条理由太长，一行放不下）。
+        const promo = out.promotion;
+        const promoLine =
+          !promo || promo.candidateCount === 0
+            ? '特质晋升：本次无候选'
+            : promo.promoted.length > 0
+              ? `特质晋升：通过 ${promo.promoted.length} 条（证据跨 ≥2 日期且含 user_direct 来源）；隔离 ${promo.blocked.length} 条`
+              : `特质晋升：隔离（${promo.blocked[0]?.reason ?? '无候选'}；候选 ${promo.candidateCount} 条）`;
         return {
           kind: 'success',
           text: [
@@ -1526,11 +1535,7 @@ export function apply(ctx: Context, config: Schemastery.TypeT<typeof Config>) {
               : 'self_model 无更新（一致性未通过或无 diff）',
             out.archiveEntry ? `成长档案已追加（${out.archiveEntry.stage}）` : '成长档案未追加',
             `自源重要性条目 ${out.selfImportance.length} 条`,
-            ...(out.promotion
-              ? [
-                  `特质晋升：${out.promotion.decision.promote ? '通过' : '隔离'}（${out.promotion.decision.reason}；候选 ${out.promotion.candidateCount} 条）`,
-                ]
-              : []),
+            promoLine,
             factLine,
             ...(lastReviewTruncated
               ? [

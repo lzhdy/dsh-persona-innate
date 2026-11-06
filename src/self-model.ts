@@ -5,6 +5,7 @@
  * 版本单调递增；保留最近 N 版可回滚。
  */
 import type {
+  CandidateTrait,
   GrowthEntry,
   SelfModelDiff,
   SelfModelFile,
@@ -52,6 +53,57 @@ function emptyFile(): SelfModelFile {
   return { version: 1, current: seedInitialSnapshot(), history: [], growthArchive: [] };
 }
 
+/**
+ * 兼容旧数据：把磁盘上任意形态的 candidateTraits 归一化成 CandidateTrait[]。
+ *
+ * 为什么必须有（ISS-048）：`candidateTraits` 从 `string[]` 改成了带证据的对象数组，
+ * 而真实用户的 self-model.json 里已经躺着 3 条字符串、history 里还有 5 个旧版本。
+ * 要求用户手工迁移是不可接受的——旧数据照样要能加载、能继续跑，只是"没有证据"，
+ * 于是按规则继续冻结（这是预期行为，不是错误，也不该抛）。
+ *
+ * 容错口径（宁可少读也不炸）：
+ * - 字符串（含首尾空白剔除）→ `{ text, sourceEventIds: [] }`；
+ * - 对象且 `text` 是非空字符串 → 补 `sourceEventIds`（过滤非字符串 id）+ 透传两个时间戳；
+ * - 其它（null / 数字 / 空文本 / 数组里的对象套对象）→ 丢弃。
+ */
+export function normalizeCandidateTraits(raw: unknown): CandidateTrait[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CandidateTrait[] = [];
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const text = item.trim();
+      if (text) out.push({ text, sourceEventIds: [] });
+      continue;
+    }
+    if (item && typeof item === 'object') {
+      const obj = item as Partial<CandidateTrait>;
+      const text = typeof obj.text === 'string' ? obj.text.trim() : '';
+      if (!text) continue;
+      out.push({
+        text,
+        sourceEventIds: Array.isArray(obj.sourceEventIds)
+          ? obj.sourceEventIds.filter((id): id is string => typeof id === 'string')
+          : [],
+        ...(typeof obj.firstSeenAt === 'string' ? { firstSeenAt: obj.firstSeenAt } : {}),
+        ...(typeof obj.lastSeenAt === 'string' ? { lastSeenAt: obj.lastSeenAt } : {}),
+      });
+    }
+  }
+  // 文本去重（保留首次出现的证据并集）：旧数据可能因为多次 commit 出现重复文本
+  const byText = new Map<string, CandidateTrait>();
+  for (const c of out) {
+    const prev = byText.get(c.text);
+    if (!prev) {
+      byText.set(c.text, c);
+      continue;
+    }
+    prev.sourceEventIds = [...new Set([...prev.sourceEventIds, ...c.sourceEventIds])];
+    if (c.firstSeenAt && (!prev.firstSeenAt || c.firstSeenAt < prev.firstSeenAt)) prev.firstSeenAt = c.firstSeenAt;
+    if (c.lastSeenAt && (!prev.lastSeenAt || c.lastSeenAt > prev.lastSeenAt)) prev.lastSeenAt = c.lastSeenAt;
+  }
+  return [...byText.values()];
+}
+
 export class SelfModelService implements SelfModelServiceLike {
   private readonly historyLimit: number;
 
@@ -72,6 +124,11 @@ export class SelfModelService implements SelfModelServiceLike {
       file.current = seedInitialSnapshot();
       await this.store.writeJson(SELF_MODEL_PATH, file);
     }
+    // 旧格式（string[]）在这里统一归一化：current 与每一版 history 都要过，
+    // 否则 rollback 到旧版本后 candidateTraits 又会变成字符串数组（类型上不报错，
+    // 运行时 `c.sourceEventIds` 全是 undefined，闸门静默失效）。
+    file.current = { ...file.current, candidateTraits: normalizeCandidateTraits(file.current.candidateTraits) };
+    file.history = file.history.map((h) => ({ ...h, candidateTraits: normalizeCandidateTraits(h.candidateTraits) }));
     return file;
   }
 
@@ -114,6 +171,12 @@ export class SelfModelService implements SelfModelServiceLike {
     const preferences = [...new Set([...current.preferences, ...(diff.preferences ?? [])])];
     const sourceEventIds = [...new Set([...current.sourceEventIds, ...evidence])];
 
+    // ISS-048：晋升成功的特质必须离开候选池。放在 commit 里做（而不是只靠调用方），
+    // 因为"同一文本同时出现在 traits 与 candidateTraits"是数据自相矛盾，
+    // 任何写入路径都不该产出这种状态。
+    const nowStable = new Set(diff.traits ?? []);
+    const candidateTraits = (current.candidateTraits ?? []).filter((c) => !nowStable.has(c.text));
+
     const sourceTraces: Partial<Record<SelfModelSource, string[]>> = {
       ...(current.sourceTraces ?? {}),
     };
@@ -134,7 +197,7 @@ export class SelfModelService implements SelfModelServiceLike {
       changeNote,
       sourceEventIds,
       sourceTraces,
-      candidateTraits: current.candidateTraits,
+      candidateTraits,
     };
 
     // 旧 current 入 history，按 historyLimit 截断（保留最近 N 版）
@@ -144,22 +207,74 @@ export class SelfModelService implements SelfModelServiceLike {
   }
 
   /**
-   * P2：把候选特质去重合并进 candidateTraits（不碰 current.traits）。
+   * P2（ISS-048 改造）：把候选特质合并进 candidateTraits（不碰 current.traits）。
    * 与 commitFromSources 同款版本化规则：版本 +1、旧 current 入 history（按 historyLimit 截断）。
+   *
+   * 合并规则（按 text 为键，不是整对象去重）：
+   * - 已存在 → sourceEventIds 取**并集**（同一特质在不同天被不同事件支撑，证据要累积，
+   *   否则"跨 ≥2 日期"永远攒不够）+ 刷新 lastSeenAt；
+   * - 不存在 → push，并记 firstSeenAt/lastSeenAt。
+   * 旧数据（无 firstSeenAt）合并时保持 firstSeenAt 缺失——宁可显示"未知"，
+   * 也不要把"今天"写成它的首次出现时间（那就是在伪造证据时间线）。
    */
-  async commitCandidates(candidates: string[]): Promise<SelfModelSnapshot> {
+  async commitCandidates(candidates: CandidateTrait[]): Promise<SelfModelSnapshot> {
     const file = await this.getFile();
     const current = file.current ?? seedInitialSnapshot();
+    const at = now();
 
-    const candidateTraits = [...new Set([...(current.candidateTraits ?? []), ...candidates])];
+    const merged = new Map<string, CandidateTrait>();
+    for (const c of current.candidateTraits ?? []) {
+      merged.set(c.text, { ...c, sourceEventIds: [...c.sourceEventIds] });
+    }
+    for (const c of candidates ?? []) {
+      const text = typeof c?.text === 'string' ? c.text.trim() : '';
+      if (!text) continue;
+      const ids = Array.isArray(c.sourceEventIds) ? c.sourceEventIds.filter((id) => typeof id === 'string') : [];
+      const prev = merged.get(text);
+      if (prev) {
+        prev.sourceEventIds = [...new Set([...prev.sourceEventIds, ...ids])];
+        prev.lastSeenAt = at;
+        continue;
+      }
+      merged.set(text, { text, sourceEventIds: [...new Set(ids)], firstSeenAt: at, lastSeenAt: at });
+    }
+    const candidateTraits = [...merged.values()];
 
     const maxVersion = Math.max(current.version, ...file.history.map((h) => h.version));
     const snapshot: SelfModelSnapshot = {
       ...current,
       version: maxVersion + 1,
-      createdAt: now(),
+      createdAt: at,
       candidateTraits,
       changeNote: `晋升隔离：${candidateTraits.length} 条候选特质待验证`,
+    };
+
+    const history = [...file.history, current].slice(-this.historyLimit);
+    await this.save({ version: 1, current: snapshot, history, growthArchive: file.growthArchive });
+    return snapshot;
+  }
+
+  /**
+   * ISS-048：按文本把候选移出候选池（晋升完成后调用）。
+   * 与 commit 路径同款版本化规则；没有任何匹配项时**不写盘**——
+   * 否则每次复盘都会因为"移除空集"白涨一个版本，把回滚窗口挤掉。
+   */
+  async removeCandidates(texts: string[]): Promise<SelfModelSnapshot> {
+    const file = await this.getFile();
+    const current = file.current ?? seedInitialSnapshot();
+    const drop = new Set((texts ?? []).map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean));
+    const before = current.candidateTraits ?? [];
+    const candidateTraits = before.filter((c) => !drop.has(c.text));
+    if (candidateTraits.length === before.length) return current;
+
+    const at = now();
+    const maxVersion = Math.max(current.version, ...file.history.map((h) => h.version));
+    const snapshot: SelfModelSnapshot = {
+      ...current,
+      version: maxVersion + 1,
+      createdAt: at,
+      candidateTraits,
+      changeNote: `候选晋升：移出 ${before.length - candidateTraits.length} 条（已进 stable）`,
     };
 
     const history = [...file.history, current].slice(-this.historyLimit);
@@ -195,7 +310,8 @@ export class SelfModelService implements SelfModelServiceLike {
       changeNote: `rollback:${version}`,
       sourceEventIds: [...target.sourceEventIds],
       sourceTraces,
-      candidateTraits: [...(target.candidateTraits ?? [])],
+      // 深拷贝一层：history 里的对象与 current 共享引用会让后续合并污染历史版本
+      candidateTraits: (target.candidateTraits ?? []).map((c) => ({ ...c, sourceEventIds: [...c.sourceEventIds] })),
     };
 
     const history = [...file.history, current].slice(-this.historyLimit);

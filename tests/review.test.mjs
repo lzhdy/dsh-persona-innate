@@ -72,6 +72,8 @@ function makeSelfModelStub(seed) {
         changeNote,
         sourceEventIds: [...(prev?.sourceEventIds ?? []), ...evidence],
         sourceTraces: { reflection: evidence, looking_glass: evidence },
+        // 与真实 SelfModelService 对齐：commitFromSources 保留候选，但晋升成功的同名候选要移出
+        candidateTraits: (prev?.candidateTraits ?? []).filter((c) => !(diff.traits ?? []).includes(c.text)),
       };
       this.current = snap;
       this.commits.push({ diff, evidence, sources, changeNote, snap });
@@ -87,6 +89,18 @@ function makeSelfModelStub(seed) {
       };
       this.current = snap;
       this.candidateCommits.push({ candidates, snap });
+      return snap;
+    },
+    async removeCandidates(texts) {
+      const prev = this.current ?? {};
+      const drop = new Set(texts);
+      const snap = {
+        ...prev,
+        version: (prev.version ?? 0) + 1,
+        createdAt: new Date().toISOString(),
+        candidateTraits: (prev.candidateTraits ?? []).filter((c) => !drop.has(c.text)),
+      };
+      this.current = snap;
       return snap;
     },
     async appendGrowth(entry) {
@@ -252,7 +266,10 @@ test('full 流程：facts / 新版本 selfModel / stage=shaping / archive / self
 
   assert.equal(out.mode, 'full');
   assert.equal(out.cost.llmCalls, 3, 'full 最多 3 次 LLM 调用（distillFacts/reflectSelf/updateMirror）');
-  assert.equal(out.promotion?.decision.promote, true, 'user_direct + 跨 2 日期 → 晋升通过');
+  // ISS-048：reflectSelf 直接产出的 traits 没有事件证据 → 恒冻结（用户拍板），
+  // 即使窗口跨了 2 个日期也不晋升。这正是"单向棘轮"被拆掉之后仍然要守住的那条线。
+  assert.deepEqual(out.promotion?.promoted, [], '即时 traits 无证据 → 不晋升');
+  assert.match(out.promotion?.blocked?.[0]?.reason ?? '', /候选无证据/, 'reason 说明缺证据');
 
   // step2 facts
   assert.ok(out.facts.length >= 1, '应提炼出语义事实');
@@ -262,15 +279,23 @@ test('full 流程：facts / 新版本 selfModel / stage=shaping / archive / self
 
   // step6 新版本
   assert.ok(out.selfModel, 'commitFromSources 应返回新版本');
-  assert.equal(out.selfModel.version, 2, '版本号递增');
-  assert.ok(
+  // v3：候选隔离先写一版（v2），随后 stable commit 再写一版（v3）——
+  // 两条写入路径各自版本化，与既有 commit 语义一致。
+  assert.equal(out.selfModel.version, 3, '版本号递增（候选隔离 + stable commit 各一版）');
+  // ISS-048：即时 traits 无事件证据 → 不进 stable，但必须落进候选池（不能凭空消失）
+  assert.equal(
     out.selfModel.traits.includes('会在用户难过时先倾听而非给建议'),
-    '新特质合并进新版本',
+    false,
+    '无证据的即时 trait 不晋升 stable',
+  );
+  assert.ok(
+    (out.selfModel.candidateTraits ?? []).some((c) => c.text === '会在用户难过时先倾听而非给建议'),
+    '即时 trait 落候选池待验证',
   );
   assert.equal(selfModel.commits[0].sources.includes('reflection'), true);
   assert.ok(selfModel.commits[0].evidence.includes('ev-share'), '证据链含事件 id');
 
-  // step7 stage：2 旧特质 + 1 新特质 = 3 → 进入 shaping（性格开始成形）
+  // step7 stage：stable 仍是 2 条旧特质，但说话方式已成形 → 仍判 shaping（性格开始成形）
   assert.equal(out.stage, 'shaping');
   assert.ok(out.stageTrajectory.includes('forming→shaping'), `轨迹应为 forming→shaping，实际 ${out.stageTrajectory}`);
 

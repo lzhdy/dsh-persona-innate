@@ -49,8 +49,9 @@ export declare const PROCEDURE_PROMPT: string;
  * 增量2 综合泛化 prompt（facts → traits 候选）。
  *
  * 与 reflectSelf 互补不重复：reflectSelf 从"当日事件"反思即时表达；
- * generalize 从"当日语义事实"归纳稳定特质（须 ≥2 证据）。泛化产物与即时特质
- * 同过 P2 晋升闸门，未过门槛同样隔离进 candidateTraits。
+ * generalize 从"当日语义事实"归纳稳定特质（须 ≥2 证据）。
+ * ISS-048：泛化产物是**唯一**能晋升的候选来源——它自带 sourceEventIds
+ * （事实的事件证据），闸门才数得出"跨几个日期"；即时特质没有证据，恒冻结。
  */
 export declare const GENERALIZE_PROMPT: string;
 /** 每日复盘引擎：8 步流水线（§10），LLM 输出解析失败时该步降级为空继续，保证 mock 无 key 可跑 */
@@ -135,6 +136,34 @@ export declare class DailyReviewEngine {
      * step6 commitVersion：commitFromSources consistency 抛错则捕获、记 issues、selfModel:null。
      */
     run(input: ReviewInput): Promise<ReviewOutput>;
+    /**
+     * ISS-048：把两路候选合成一个候选列表（按 text 去重，证据取并集）。
+     *
+     * 两路来源的差别是**有没有证据**，这正是闸门要区分的东西：
+     * - `instant`（reflectSelf 直接产出的 traits）：LLM 说"我是这样的人"，但没有事件指向它 →
+     *   `sourceEventIds: []` → 闸门第一步就冻结（用户已拍板：即时 traits 永不晋升）；
+     * - `gens`（generalize 产出）：来自 type=self facts，天然带事件证据 → 可晋升。
+     * 同一文本两路都出现时合并证据：宁可让它有机会晋升，也不要因为先到的是即时 traits
+     * 就把整条判死（否则"泛化结论恰好和即时表述同字"会被永久冻结）。
+     */
+    private buildTraitCandidates;
+    /**
+     * ISS-048：把本轮候选与候选池里同名条目合并（证据取并集）。
+     *
+     * 这是"闸门能看到候选一生"的关键一步：泛化特质每轮只带当天证据，
+     * 池子里存着前几轮累积的证据，两者合并才可能凑出"跨 ≥2 个日期"。
+     * 池里没有同名条目 → 原样返回（新候选从零开始攒）。
+     */
+    private mergeWithCandidatePool;
+    /**
+     * ISS-048：构造晋升证据表（事件 id → 时间/来源）。
+     *
+     * 读的是**全量**事件而不是本次窗口：门槛问的是"这条候选一生跨了几个日期"，
+     * 而窗口是按天裁的（与 procedures 的做法一致，见 decideProcedurePromotion）。
+     * 优先复用调用方传进来的 allEvents，避免同一轮复盘把全量日志读两遍。
+     * 读失败 → 返回空表：查不到证据就当证据不存在，一律冻结（保守：宁可不晋升）。
+     */
+    private loadTraitEvidence;
     /** 宽松 JSON 解析：先直 parse，失败再截取首个 {...} 块；都失败 → null（调用方降级为空） */
     private parseJsonLoose;
     /** 事件标签：事件支撑了哪类事实（fact:user/world/self）+ initiation / 情绪标签 */

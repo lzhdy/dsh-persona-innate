@@ -214,7 +214,7 @@ export interface SelfModelSnapshot {
     /** 本次更新的来源映射 */
     sourceTraces?: Partial<Record<SelfModelSource, string[]>>;
     /** P2：候选特质（未过 §4.4 晋升门槛，只保留不注入） */
-    candidateTraits?: string[];
+    candidateTraits?: CandidateTrait[];
 }
 /** 自我模型增量（commit 输入） */
 export interface SelfModelDiff {
@@ -230,6 +230,27 @@ export interface PromotionDecision {
     promote: boolean;
     /** 可审计的决策理由（无论晋升与否都必须非空） */
     reason: string;
+}
+/**
+ * 候选特质（ISS-048：候选必须自带证据，否则"跨日期"永远无从判定）
+ *
+ * 为什么不是 `string[]`：晋升门槛是「**自身证据**跨 ≥2 个日期」，
+ * 而"证据"属于候选而不是属于"今天这个复盘窗口"。只存字符串的话，
+ * 每轮只能拿当次窗口去猜，单日窗口恒为 1 天 → 没有任何候选能晋升（单向棘轮）。
+ *
+ * 证据从哪来：
+ * - 泛化特质（generalize）：来自 type=self 的 facts，天然带 sourceEventIds；
+ * - LLM 即时产出的 traits（diff.traits）：没有事件证据 → 恒为空数组 → 按规则永远冻结（用户已拍板）。
+ */
+export interface CandidateTrait {
+    /** 特质文本（与 stable traits 同一命名空间，晋升后按文本对齐） */
+    text: string;
+    /** 支撑证据（事件 id）；为空 = 无证据，永不晋升 */
+    sourceEventIds: string[];
+    /** 首次进入候选池的时刻（旧数据可能缺失） */
+    firstSeenAt?: string;
+    /** 最近一次被再次提及的时刻 */
+    lastSeenAt?: string;
 }
 /** 人格发展阶段（复盘 step7 判定；M1"性格开始成形"= 进入 shaping） */
 export type PersonaStage = 'seeding' | 'forming' | 'shaping' | 'stable';
@@ -259,7 +280,12 @@ export interface SelfModelServiceLike {
     rollback(version: number): Promise<SelfModelSnapshot | null>;
     appendGrowth(entry: GrowthEntry): Promise<void>;
     /** P2：把候选特质去重合并进 candidateTraits（不碰 stable traits），版本 +1、旧 current 入 history */
-    commitCandidates(candidates: string[]): Promise<SelfModelSnapshot>;
+    commitCandidates(candidates: CandidateTrait[]): Promise<SelfModelSnapshot>;
+    /**
+     * ISS-048：按文本移除候选（晋升为 stable 后必须离开候选池，
+     * 否则同一特质会同时存在于 traits 与 candidateTraits，审计口径互相打架）。
+     */
+    removeCandidates(texts: string[]): Promise<SelfModelSnapshot>;
     /** 注入层摘要（同步纯函数，O21：状态每轮注入、自我模型按需摘要） */
     getInjectionSummary(snapshot?: SelfModelSnapshot | null): string;
 }
@@ -338,9 +364,19 @@ export interface ReviewOutput {
     memoryFacts: MemoryFactStats;
     /** 增量1：procedures 程序性记忆派生统计（降级/skip 时为未执行） */
     procedures?: ProcedureStats;
-    /** P2：本次 traits 晋升/隔离决策 */
+    /**
+     * P2（ISS-048 改造）：本次 traits 晋升结果。
+     * 逐候选判定，因为门槛看的是"候选自身证据"，不是"今天这个窗口"。
+     */
     promotion?: {
-        decision: PromotionDecision;
+        /** 通过闸门、已写入 stable 的文本 */
+        promoted: string[];
+        /** 被隔离的候选及原因（可审计） */
+        blocked: {
+            text: string;
+            reason: string;
+        }[];
+        /** 本次候选总数（promoted + blocked） */
         candidateCount: number;
     };
     cost: {

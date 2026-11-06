@@ -367,7 +367,9 @@ const ITEMS = [
     witnesses: [
       { label: 'this.generalize', pattern: 'this\\.generalize\\(', definedIn: 'review.ts', expectIn: ['review.ts'], symbol: 'generalize' },
     ],
-    note: '泛化产物并入 candidateTraits，与即时特质同过晋升闸门；边界A已兜底',
+    note:
+      '泛化产物带 sourceEventIds 进候选，按「自身证据跨 ≥2 日期 + 含 user_direct」逐条晋级（ISS-048）；' +
+      '即时 traits 无证据 → 恒冻结，不再有"整批一刀"的 promote',
   },
   {
     id: 'P4-assembler',

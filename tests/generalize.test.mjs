@@ -289,21 +289,32 @@ test('run 集成：泛化特质与 reflectSelf traits 去重合并进 candidateT
 
   assert.equal(out.cost.generalizeCalls, 1, 'generalize 单独计 1 次调用');
   assert.equal(out.cost.llmCalls, 3, 'llmCalls 口径不变（仍只计核心三步）');
-  assert.equal(out.promotion?.decision.promote, false, '无 user_direct → 隔离');
+  // ISS-048：逐候选判定。两条各自冻结——
+  // 但理由都落在"日期"上：泛化特质有证据（同一天两条 inferred），
+  // 而「即时特质」的同名条目**也**由泛化路径给出，合并后同样带上了这两条证据
+  // （buildTraitCandidates 按文本合并、证据取并集：宁可让它有机会晋升，
+  //  也不要因为先到的是即时表述就把整条永久判死）。
+  assert.deepEqual(out.promotion?.promoted, [], '两条都不晋升');
+  const reasons = Object.fromEntries((out.promotion?.blocked ?? []).map((b) => [b.text, b.reason]));
+  assert.match(reasons['泛化特质'] ?? '', /仅跨单个日期/, '泛化特质：证据只落在 1 个日期');
+  assert.match(reasons['即时特质'] ?? '', /仅跨单个日期/, '即时特质：合并到的证据同样只落在 1 个日期');
 
   const snap = await selfModel.load();
-  assert.ok(snap.candidateTraits.includes('泛化特质'), '泛化特质进 candidateTraits');
-  assert.ok(snap.candidateTraits.includes('即时特质'), '即时特质进 candidateTraits');
+  assert.ok(snap.candidateTraits.some((c) => c.text === '泛化特质'), '泛化特质进 candidateTraits');
+  assert.ok(snap.candidateTraits.some((c) => c.text === '即时特质'), '即时特质进 candidateTraits');
   assert.equal(
-    snap.candidateTraits.filter((t) => t === '即时特质').length,
+    snap.candidateTraits.filter((c) => c.text === '即时特质').length,
     1,
-    '重复特质去重合并，不重复写入',
+    '重复特质按文本去重合并，不重复写入',
   );
+  // 证据必须跟着候选一起进池子（原缺陷就是在这里把 sourceEventIds 丢了）
+  const gen = snap.candidateTraits.find((c) => c.text === '泛化特质');
+  assert.deepEqual(gen.sourceEventIds.sort(), ['ev_a', 'ev_b'], '泛化候选必须自带证据');
 });
 
-/* ── 7. 边界 A：promote=true 且 diff.traits 为空时，泛化特质仍落 candidate ── */
+/* ── 7. 泛化特质带证据跨 2 日期 → 晋升进 stable（ISS-048 后的正向通路）── */
 
-test('run 集成·边界A：promote=true 且 reflectSelf 无 traits 时，泛化特质仍落 candidateTraits', async () => {
+test('run 集成：泛化特质跨 2 日期且含 user_direct → 晋升进 stable，候选池不留同名', async () => {
   const store = await freshStore();
   const selfModel = makeSelfModelStub(null);
   const llm = new MockLlm([
@@ -358,13 +369,17 @@ test('run 集成·边界A：promote=true 且 reflectSelf 无 traits 时，泛化
     feedback: [],
   });
 
-  assert.equal(out.promotion?.decision.promote, true, 'user_direct + 跨 2 日期 → 命中边界 A 的 promote=true 分支');
+  // 泛化特质带 ev_a(user_direct 11-01) + ev_b(self_direct 11-02)：跨 2 日期 + 含 user_direct → 晋升。
+  // 这是 ISS-048 修复后才存在的通路——原实现拿"本次窗口"当证据，这类候选永远过不了闸门。
+  assert.deepEqual(out.promotion?.promoted, ['泛化特质'], '带证据且跨日期 → 晋升');
+  assert.deepEqual(out.promotion?.blocked, [], '没有候选被隔离');
 
   const snap = await selfModel.load();
-  assert.ok(snap.candidateTraits.includes('泛化特质'), '修复后泛化特质落 candidate，不被吞');
-  assert.ok(
-    !(snap.traits ?? []).includes('泛化特质'),
-    '泛化特质不直接进 stable',
+  assert.ok((snap.traits ?? []).includes('泛化特质'), '泛化特质进入 stable');
+  assert.equal(
+    (snap.candidateTraits ?? []).some((c) => c.text === '泛化特质'),
+    false,
+    '晋升后候选池里不得再有同名条目（否则同一特质两处并存）',
   );
 });
 
