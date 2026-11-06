@@ -8,7 +8,8 @@
     "evidenceEventIds": ["e-001"],
     "speaker": "user",
     "timeRange": { "from": "2026-11-03", "to": "2026-11-03" },
-    "validity": "active"
+    "validity": "active",
+    "check": "speaker_provenance"
   },
   {
     "id": "spk-002",
@@ -19,7 +20,8 @@
     "evidenceEventIds": ["e-002"],
     "speaker": "assistant",
     "timeRange": null,
-    "validity": "active"
+    "validity": "active",
+    "check": "speaker_provenance"
   },
   {
     "id": "spk-003",
@@ -30,6 +32,7 @@
     "evidenceEventIds": ["e-003"],
     "speaker": "system",
     "timeRange": null,
-    "validity": "active"
+    "validity": "active",
+    "check": "speaker_provenance"
   }
 ]

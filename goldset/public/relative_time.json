@@ -8,28 +8,34 @@
     "evidenceEventIds": ["e-004"],
     "speaker": null,
     "timeRange": { "from": "2026-11-03", "to": "2026-11-03" },
-    "validity": "active"
+    "validity": "active",
+    "check": "local_date",
+    "queryAt": "2026-11-04T15:03:00"
   },
   {
     "id": "rel-002",
     "category": "relative_time",
-    "question": "11月3日23:59与11月4日00:01的两条消息属于同一天吗？",
-    "goldAnswer": "否",
+    "question": "11月3日23:59与11月4日00:01两条消息相隔几个本地日历日？",
+    "goldAnswer": "1",
     "allowAbstain": false,
     "evidenceEventIds": ["e-005", "e-006"],
     "speaker": null,
     "timeRange": { "from": "2026-11-03", "to": "2026-11-04" },
-    "validity": "active"
+    "validity": "active",
+    "check": "day_diff",
+    "queryAt": "2026-11-04T00:01:00"
   },
   {
     "id": "rel-003",
     "category": "relative_time",
     "question": "事件发生于11月3日，11月4日复盘时被标成「昨天」，11月5日再问这件事是「几天前」？",
-    "goldAnswer": "2天前",
+    "goldAnswer": "2 天前",
     "allowAbstain": false,
     "evidenceEventIds": ["e-007"],
     "speaker": null,
     "timeRange": { "from": "2026-11-03", "to": "2026-11-03" },
-    "validity": "active"
+    "validity": "active",
+    "check": "relative_label",
+    "queryAt": "2026-11-05T12:00:00"
   }
 ]

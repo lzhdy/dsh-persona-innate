@@ -1,0 +1,81 @@
+[
+  {
+    "id": "e-001",
+    "time": "2026-11-03T21:14:00",
+    "topic": "闲聊-游戏",
+    "summary": "用户问海克斯大乱斗打得怎么样",
+    "emotionTags": ["neutral"],
+    "importance": 0.4,
+    "provenance": "user_direct",
+    "lastRetrieved": null,
+    "initiation": "user_initiated"
+  },
+  {
+    "id": "e-002",
+    "time": "2026-11-03T21:16:00",
+    "topic": "对话-澄清",
+    "summary": "助手以疑问句确认用户是否说过更喜欢简洁回复",
+    "emotionTags": ["neutral"],
+    "importance": 0.3,
+    "provenance": "self_direct",
+    "lastRetrieved": null,
+    "strength": "weak",
+    "initiation": "self_initiated"
+  },
+  {
+    "id": "e-003",
+    "time": "2026-11-04T02:00:00",
+    "topic": "系统-复盘",
+    "summary": "系统生成每日复盘通知",
+    "emotionTags": [],
+    "importance": 0.2,
+    "provenance": "self_direct",
+    "lastRetrieved": null,
+    "strength": "weak",
+    "initiation": "self_initiated"
+  },
+  {
+    "id": "e-004",
+    "time": "2026-11-03T21:14:00",
+    "topic": "闲聊-游戏",
+    "summary": "用户在11月3日晚上聊海克斯大乱斗战绩",
+    "emotionTags": ["neutral"],
+    "importance": 0.4,
+    "provenance": "user_direct",
+    "lastRetrieved": null,
+    "initiation": "user_initiated"
+  },
+  {
+    "id": "e-005",
+    "time": "2026-11-03T23:59:00",
+    "topic": "闲聊-深夜",
+    "summary": "用户在11月3日深夜发消息",
+    "emotionTags": ["neutral"],
+    "importance": 0.3,
+    "provenance": "user_direct",
+    "lastRetrieved": null,
+    "initiation": "user_initiated"
+  },
+  {
+    "id": "e-006",
+    "time": "2026-11-04T00:01:00",
+    "topic": "闲聊-深夜",
+    "summary": "用户在11月4日凌晨发消息",
+    "emotionTags": ["neutral"],
+    "importance": 0.3,
+    "provenance": "user_direct",
+    "lastRetrieved": null,
+    "initiation": "user_initiated"
+  },
+  {
+    "id": "e-007",
+    "time": "2026-11-03T20:30:00",
+    "topic": "生活-事件",
+    "summary": "用户在11月3日提到周末安排",
+    "emotionTags": ["neutral"],
+    "importance": 0.35,
+    "provenance": "user_direct",
+    "lastRetrieved": null,
+    "initiation": "user_initiated"
+  }
+]

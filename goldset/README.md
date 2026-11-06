@@ -61,6 +61,8 @@ goldset/
 - `allowAbstain`：`true` 时「弃权」也是可接受答案（对应 `abstention` 类与不可回答项）。
 - `evidenceEventIds`：gold 答案的证据事件 id（合成 id，如 `e-001`，可为空数组）。
 - `speaker` / `timeRange` / `validity`：辅助标注（可空）。
+- `check`（第二期新增，可选）：声明该条用哪个确定性函数评分，live 实测用。取值见 §8.2；缺省按类别默认（speaker 用 `speaker_provenance`）。
+- `queryAt`（第二期新增，可选）：relative_time 类的「查询/评估参考时刻」（本地墙钟 ISO，无时区偏移），供 `relative_label` 等 check 使用。
 
 所有样例均脱敏/合成，取自最终设计 §12 症状表的最小案例，不涉及真实用户数据。
 
@@ -99,13 +101,63 @@ goldset/
 ## 6. 跑分
 
 ```bash
-npm run eval:goldset                    # 空跑公开集全部类别，输出 JSON 到 stdout
+npm run eval:goldset                    # 空跑公开集全部类别，输出 JSON 到 stdout（默认，结构不变）
 node scripts/eval-goldset.mjs --category speaker   # 只跑 speaker 类
 node scripts/eval-goldset.mjs --hidden 1           # 追加跑隐藏集
+
+npm run build && node scripts/eval-goldset-live.mjs            # 实测：读 fixture，接确定性实现
+node scripts/eval-goldset-live.mjs --category speaker          # 实测单类
+node scripts/eval-goldset-live.mjs --hidden 1                  # 实测含隐藏集
 ```
 
-当前阶段（无被测实现）脚本空跑成功：读入样例、按类别聚合、输出「未测（null）」的指标框架，不报错。
+> 两条入口职责不同：`eval-goldset.mjs` 是**空跑框架**（无被测实现，全部 null，默认行为与第一期逐字节一致）；`eval-goldset-live.mjs` 是**实测接线**（只接确定性纯函数，见 §8）。live 依赖 `lib/`，运行前先 `npm run build`。
+
+当前阶段空跑脚本读入样例、按类别聚合、输出「未测（null）」的指标框架，不报错。
 
 ## 7. 未测项原则
 
-对应最终设计 §14「未测项保持未验证，不得填写预估值」：当前所有准确性指标（1-11）一律输出 `null`，成本指标（12-13）输出占位 `{"value": null, "note": "成本指标待系统跑通后接实测"}`，待 P3-P6 施工单元接入真实作答后再填充。
+对应最终设计 §14「未测项保持未验证，不得填写预估值」：空跑脚本所有准确性指标（1-11）输出 `null`，成本指标（12-13）输出占位 `{"value": null, "note": "成本指标待系统跑通后接实测"}`。
+
+live 实测中，`null` 必须可解释——每项附带机器可读的 `unmeasured` 字段，区分三种原因：
+
+| `unmeasured` | 含义 |
+|---|---|
+| `no_samples` | 该指标对应类别当前 0 条样例（不是实现缺失） |
+| `no_implementation` | 有样例，但仓库里没有能得出答案的确定性实现（或 gold 落在实现值域外） |
+| `cost_not_wired` | 成本指标（12/13），需系统整体跑通后接实测 |
+
+**有样例且算出 0 的必须如实输出 `0` 与 `pass: false`，不得写成 `null`。** 若某指标部分样例未测，`value` 按「已测条目」计算，同时用 `measured` / `total` / `skipped` 透明标注未测条目，不把未测当错。
+
+## 8. 怎么跑出真数（live 实测）
+
+### 8.1 为什么要 fixture
+
+样例的 `evidenceEventIds`（`e-001`…）此前指向仓库里不存在的事件。`goldset/fixtures/events.json` 补齐这些 id 对应的 `PersonaEvent[]`，内容与样例问题自洽（时间、来源与 goldAnswer 一致）。live 脚本先把 fixture 写进内存 `JsonStore`（`src/store.ts` 的 `JsonStore`，内存 `FsLike` 适配，不触碰真实 `~/.dsh/persona-innate`）再读回，确保事件是合法可持久化形状。
+
+- fixture 的 `time` 用**无时区偏移的本地墙钟 ISO**（如 `2026-11-03T23:59:00`），保证「跨本地零点」类断言与运行时区无关。
+- 目前覆盖 e-001…e-007 共 7 条，对应 6 条样例。
+
+### 8.2 已接线的确定性实现
+
+| 类别 | 指标 | 真实实现 | `check` 值 |
+|---|---|---|---|
+| speaker | 1 | `src/memory-facts.ts:inferSpeakerEpistemic(provenance).speaker` | `speaker_provenance` |
+| relative_time | 2 | `src/time.ts:localDateString` | `local_date` |
+| relative_time | 2 | `src/time.ts:localDayDiff` | `day_diff` |
+| relative_time | 2 | `src/recall.ts:relativeDayLabel` | `relative_label` |
+
+评分方式：直接比较「实现输出」与 `goldAnswer` 字符串，不写任何评测专用判定逻辑。
+
+### 8.3 当前仍不可测的项及原因
+
+| 指标 | `unmeasured` | 原因 |
+|---|---|---|
+| 3,4（知识更新） | `no_samples` | `knowledge_update` 类 0 条样例 |
+| 5,6（污染识别） | `no_samples` | `contamination` 类 0 条样例 |
+| 7,8（弃权） | `no_samples` | `abstention` 类 0 条样例 |
+| 9,10（人格稳定） | `no_samples` | `persona_stability` 类 0 条样例 |
+| 11（证据链接） | `no_samples` | `association` 类 0 条样例 |
+| 12,13（成本） | `cost_not_wired` | 需系统整体跑通后接实测 |
+| 1 的 `spk-003` | `no_implementation` | gold 为 `system`，但 `PersonaEvent.provenance` 七态只映射 user/assistant/tool，无 system 来源；唯一能产出 system 的 `raw-turn.ts:speakerOf(type)` 需要原始事件类型，而 PersonaEvent 不含 type。该条不计入分母，在 `skipped` 中点名 |
+
+> `spk-003` 的 `system` 归属缺口是**真实建模缺口**，不是评测脚本的缺陷：要在 PersonaEvent 层支持 system speaker，需 P3 schema 增补来源字段。在此之前保持未测，不伪造数值。
