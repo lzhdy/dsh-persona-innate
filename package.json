@@ -27,6 +27,7 @@
     "test:only": "node --test tests/*.test.mjs",
     "audit": "node scripts/audit-capabilities.mjs",
     "audit:write": "node scripts/audit-capabilities.mjs --write",
+    "audit:extract": "node scripts/audit-extraction.mjs",
     "eval:goldset": "node scripts/eval-goldset.mjs"
   },
   "keywords": [
