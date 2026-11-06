@@ -1,6 +1,6 @@
 # 问题记录清单（Issue Register）
 
-**版本**：v1.15 · 日期：2026-11-06（条目 64 条：60 条有效 + 4 条误诊留档）
+**版本**：v1.16 · 日期：2026-11-06（条目 67 条：63 条有效 + 4 条误诊留档）
 **配套文档**：`README.md`（使用说明）、`docs/mechanism-design.md`（唯一总设计文档 v1.0.0）、`docs/capability-ledger.md`（`npm run audit --write` 自动生成的能力台账）
 
 ---
@@ -70,6 +70,8 @@
 | 工具 `persona_note` 报「执行失败」，可内容好像又记住了 | ISS-058 | **已修（0.5.7）**：成功时返回值带 `reason: undefined` 被判非法 JSON，属假失败，事件其实已落库 |
 | 她说「Updated memory for topic 共同记忆」，可问她内容却答不出 | ISS-059 | `open`：那是模型自己编的通知文本（无 tool-call、无写入），不是插件或 UI 的输出 |
 | 聊久了/聊到第 20 轮左右，她突然不记得前一句说了什么 | ISS-060 | `open`：每轮重复追加整份人格快照（占 prompt 过半），越过 33024 后被 llama.cpp 一次性丢掉一半上下文，dsh 侧无任何事件 |
+| 我让她记住，她调了工具也说成功了，可之后她完全不提 | ISS-061 | `open`：`persona_note` 写的是 `inferred` 但从不带 `sourceEventIds`，被装配入口全部拦掉——**写进了一个没人读的抽屉** |
+| 记忆里混进了「说的时候不用回复」这类要求，怕她当真 | ISS-062 | `open`：闸门只认「你要/你应该」句式，第三人称转述可穿过两层闸门；目前只被 ISS-061 的字段缺失碰巧挡住 |
 
 ---
 
@@ -166,6 +168,9 @@
 | ISS-058 | `persona_note` **成功即报错**：返回值带 `reason: undefined`，被判非法「无损 JSON」→ **已修** | P1 | `fixed` | **2026-11-06 用户贴图**（"工具 persona_note 执行失败 ToolOutputError: INVALID_TOOL_OUTPUT"）后定位：QQ 会话 `session-87fee499` turn 4 step 1 的 tool result 原文是 `Error: tool "persona_note" returned invalid output: value is not lossless JSON`。**根因**：`AddResult.reason` 是可选字段（`memory.ts:37`），**成功时正是 `undefined`**；而 `execute` 无条件把它带进返回值（原 `index.ts:1333` `return { ok: !res.rejected, reason: res.reason }`）。我实测 dsh 的判定：`isJsonValue({ok:true, reason:undefined}) === false`、`isJsonValue({ok:true}) === true` → 失败的不是写入，是**返回值形状**。**假失败的副作用**：`memory.addEvent` 在输出校验之前就已执行，事件确实落库（`events/2026-11.jsonl` 11-06T08:02Z `topic=用户要求 / provenance=inferred`），但用户看到"执行失败"。**修法**：成功分支省略 `reason` 键；`tests/assembly.test.mjs` 补断言（`reason` 键不得存在 + 每个字段不得为 `undefined`）。**变异验证**：把旧写法植回 `lib/index.js` 后单跑该测试 → `# fail 1`，报错正是"persona_note 返回字段 reason 不能是 undefined"。**这意味着修之前 persona_note 只有"写入失败"这条路径不报错——一成功就报错。** |
 | ISS-059 | **模型伪造工具执行结果**：她发 `[Persona recall updated] 📍 Updated memory for topic 共同记忆`，但记忆没有写入 | P1 | `open` | **2026-11-06 用户贴图**（"这个是什么情况"）后查证：`session-87fee499` 的 seq 215 是一条**纯文本 assistant 消息**（`content:[{type:'text'}]`、`stopReason="stop"`、`outputTokens=16`、**无 tool-call**），不是工具调用、不是插件输出、不是 UI 提示——**仓库与 dsh 全部包里搜这句文案零命中**；且 `events/2026-11.jsonl` 中 `共同记忆` **0 条**，证明记忆根本没写。**归因**：① 上一轮 `persona_note` 刚好失败（ISS-058），她手里没有"成功回执"的样板；② 文案里混用了 `Persona recall`（读工具名）而不是 `persona_note`（写工具名）——生成痕迹，不是回显；③ **归因更正（v1.15）**：同会话 turn 8–12、15–20 的回复原文就是 `...`（3 字 / `outputTokens=2`），但**不是上下文退化**——21 个 `turn/end` 全部是 `{"kind":"completed"}`，一次 `max-tokens` 都没有；turn 7 她先答应了「可以，你发的时候我不回复，等你说完了我再回应~」，之后那些 `...` 是执行"别说话"指令时的拙劣妥协。真正的容量事件发生在 turn 20：`inputTokens` 从 32226 断崖到 15771（见 ISS-060）。**影响**：比工具报错更危险——用户会以为记住了，其实没有；这是"信任被假信号消耗"。**修法（待拍板）**：① 先修 ISS-058 让工具真的可用（已修）；② 旁路观测层加一个**只计数不改写**的检测：assistant 文本形如 `[Xxx updated]` 但同轮无 tool-call 时计数告警（符合理念 4"旁路不拦截，只追加"）；③ 根本仍是 ISS-056 的容量。 |
 | ISS-060 | **每轮重复追加整份人格快照**：22 轮 = 22 份 `runtime-context` 共 40,046 字符，占全会话内容 **84%**；第 19 轮 prompt 里过半是它 → 越过 33024 后被 llama.cpp 静默丢掉一半上下文 | P0 | `open` | **2026-11-06 实测**（QQ 会话 `session-87fee499`，21 轮 / 219 事件）：① dsh 的 `systemPrompt.context()` **不写 system prompt**，而是每轮追加一条 `user/message`（`source.kind="runtime-context"`，开头 `This snapshot supersedes earlier runtime-context snapshots.`——**只声明作废，不删除**）。② `dsh-agent-loop` 的去重条件是**整份文本逐字节相同**（`RuntimeContextProjection.project()`：`if (this.retained?.text === snapshot) return;`），不同就 `session.append("user/message", context, { surfaceOp: "append" })`，**没有 in-place replace 通道**。③ 本插件 `persona-context` 含「本轮用户消息：N 字」，**每轮必变**；21 次相邻快照逐段比对，**20 次只有 `persona-context` 变化**（77–85 字符抖动），却把整份 1,817 字符快照重新追加（放大约 23 倍）。**量化**：22 份快照 40,046 字符 vs 用户真实消息 2,624 字符（**15 倍**）；全会话字符构成 = 快照 40,046（84.2%）/ 工具结果 3,756（8%）/ 用户真实消息 2,624（6%）/ AI 回复 1,139（2%）；同一份「5 条记忆 + 状态 + 自我模型」被原文重复 22 遍。**后果**：`inputTokens` 每轮稳定 +905，第 19 轮到 32,226，再加一轮约 920 即越过 LM Studio 实开的 `loaded_ctx=33024` → turn 20 断崖到 15,771（少 16,455 ≈ 33,024/2，llama.cpp context shift 一次性丢一半），**dsh 侧零事件、`turn/end` 仍是 `completed`**。这是"聊久了她突然不记得刚刚说了什么"的机制层解释，也是 ISS-056 的实际触发路径。**修法（待拍板）**：① 最小改动——把 `persona-context` 的每轮变量分桶（<20 / 20–60 / >60 字）、`persona-state` 均值取 1 位小数或分桶，让快照在多数轮次逐字节相同，去重才生效（预计 22 轮从 22 份降到 3–5 份，省 1.5 万 token）；② 给三块设整体预算，超阈值合并压缩；③ 治本要 dsh 内核把 `runtime-context` 改成 `surfaceOp: replace`（内核行为，插件改不了，只能上报上游）。 |
+| ISS-061 | **`persona_note` 写进去的每一条都是死信**：`inferred` 缺 `sourceEventIds` → 装配入口 `traceableInferred` 全部拦掉；`persona_recall` 走同一条路径，也查不到 | P0 | `open` | **2026-11-06 实测**（用户问「记进库的那条会不会影响后续聊天」）：① `index.ts` 里 `persona_note.execute` 只传 topic / summary / provenance=inferred / importance，**从不传 `sourceEventIds`**；② `assembleRecall` 第一行就是 `const pool = events.filter((e) => traceableInferred(e))`，而 `traceableInferred`（`provenance.ts`）对 `inferred` 要求 `sourceEventIds` 非空 → 一律 `false`；③ 实测 46 条事件里**恰好 1 条被拦，就是 `878a4fa3`**（`topic=用户要求`），`assembleRecall(46, 5)` 产出的 5 条里没有它。**含义**：修 ISS-058 只修了「回执报错」，**写入的内容仍然永远出不来**——「让她记住」这个唯一由她主动发起的记忆通道，落库成功但读不回来，用户体感是「她答应了却记不住」。**修法（待拍板，不能孤立修）**：note 落库时带 `sourceEventIds` 指向触发它的那条用户消息（`raw_turns` 已有原文与 turn 号，能对上）。**但单独补这一字段会立刻打开 ISS-062 的口子**，必须一起定。 |
+| ISS-062 | **指令闸门只判句式、不判意图**：一条纯行为要求只要被转述成第三人称事实，就能同时穿过写入宽口径与注入严口径 | P1 | `open` | **2026-11-06 实测**（直接跑 `stripMemoryFact`）：`用户要求：…说的时候不用回复` **放行**、`以后我说话的时候你不用回复` **放行**、`用户希望我以后回复短一点` **放行**；只有 `你要多关心我` 被拦（`fact:demand-care-for-me`）。闸门认的是「你要 / 你应该」这类句式，不认「这是一条要求我改变行为的东西」。**当前没出事纯属巧合**：那条记忆只被 ISS-061 的字段缺失挡在门外，与「它是指令」无关——**一旦补上 `sourceEventIds`，它就会进来**。算过显著性：0.5 × 0.9 ×（0.25 + 0.75 × recency）= **0.449**，在当时候选里排第 4 左右，会连续 72 小时霸占近因槽，注入文本是「用户要求：…说的时候不用回复」——**一条伪装成事实的行为指令**，直接撞理念 1（不注入行为指令）与理念 5（诚实基线）。**修法（待拍板，只追加不拦截）**：① 给事实加「衍生自用户请求」标记，注入时以「用户的请求」语义呈现而不是「事实」；② 或对「含对我行为要求」的记忆在显著性上降权并加标注，不做硬拦（理念 4）。 |
+| ISS-063 | **自我表达事件的 `topic` 是「标题即残句」**：`pattern` 取信号词之后至多 6 个字符当标签，直接落库并进入注入行 | P2 | `open` | **2026-11-06 核对**：`extract.ts` 的 `themeOf()` 用正则取信号词后的 6 个中文/字母数字字符，`index.ts:1216` 把它当 `topic` 落库。库里因此存在 `承诺-的`、`承诺-接上之前的话`、`立场-在根据你说的`、`修正-时间线吗`、`修正-小辉` 这类标签，而它们会原样出现在注入行 `- [自身表达] 2026-11-05 承诺-的：好，我会先把重点记下来…`——她每轮读到的记忆标题是一句被切了一刀的话。**影响**：不影响检索（检索用 summary 与 provenance），影响可读性与「她能不能一眼认出这是什么事」。**修法（待拍板）**：标签改为「信号类别 + 语义摘要主语」生成，或直接用 `selfPattern` 分类名，不拼主题。 |
 
 ---
 
@@ -281,14 +286,14 @@
 
 | 状态 | 数量 |
 |---|---|
-| `open` | 29 |
+| `open` | 32 |
 | `observing` | 5 |
 | `partial` | 3 |
 | `deferred` | 4 |
 | `wontfix` | 3 |
 | `fixed` | 16 |
 | `invalid` | 4 |
-| **合计** | **64**（60 条有效 + 4 条误诊留档） |
+| **合计** | **67**（63 条有效 + 4 条误诊留档） |
 
 **按这个清单，接下来最该做的六件事（顺序）**
 
@@ -300,6 +305,8 @@
 5. **ISS-007 注入缓存 + ISS-022 拍板**：`index.ts:452-455` 四个注入缓存是进程级 `let`，接 QQ 后每个私聊都是独立 session，串味会被放大；ISS-022 的"用户优先"排序属理念判读（"让她更懂你"还是"让她更成为她"），要用户定方向。
 
 **一句话概括当前处境**：中间七层做得比两端精细得多——**入口按关键词白名单筛（13.5%），出口按 5 条截断，两端一夹，中间的精细就没有体感**。
+
+**而 2026-11-06 傍晚这轮追查把话说得更重了**：唯一的主动写入通道  写进去的是**没人读的抽屉**（ISS-061： 无  被入口全部拦掉），闸门**只认句式不认意图**（ISS-062），出口又被自己的人格快照挤掉 84%（ISS-060）。也就是说——**现在不是「她记得不牢」，是这条链从头到尾没有一段是通的**。ISS-053/060/061/062 必须一起设计，单独修任何一条都会把问题挪个位置。
 
 ---
 
@@ -323,3 +330,4 @@
 | 2026-11-06 | v1.13 | **用户提出"记忆该像人一样分四档衰减"后做全链路溯源，新增 5 条**：ISS-053 提取入口是白名单式规则（37 条用户消息仅 5 条入库 = 13.5%，静默丢弃无日志；新增 `scripts/audit-extraction.mjs` 可重跑复现，`npm run audit:extract`）；**同时更正 v1.11 前"用户消息→事件 35%"的口径错误**（分子含 8 条 P1 上线前事件，与分母不同期）；ISS-054 读取端固定 5 条 / 700 字且 `importance` 写入后永不更新 → 四档记忆零机制承载；ISS-055 `attributes`/`procedures` 零注入（"记下来了，说不出来"）；ISS-056 上下文打满时整条回复退化为 1 个 token（QQ 会话实锤 `stopReason=length`，窗口声明 32768 / LM Studio 实开 33024 / 模型支持 262144）；ISS-057 `raw_turns` 建好未接线（`deferred`，设计分期非缺陷）。优先级表由 3 项重排为 5 项，ISS-053 置顶。统计 `open` 23→27、`deferred` 3→4、合计 56→61 |
 | 2026-11-06 | v1.14 | **用户贴 QQ 截图问「persona_note 为什么用不了」与「[Persona recall updated] 是什么情况」，查出两条**：① **ISS-058（已修）`persona_note` 成功即报错**——返回值带 `reason: undefined` 被 dsh 判非法「无损 JSON」（实测 `isJsonValue({ok:true, reason:undefined}) === false`），而 `addEvent` 在校验前已执行，所以是**假失败、记忆其实写了**；修法为成功分支省略该键，补装配级断言，并做变异验证（植回旧写法 → `# fail 1`）。② **ISS-059（open）模型伪造工具执行结果**——`[Persona recall updated] 📍 Updated memory for topic 共同记忆` 是一段纯生成文本（无 tool-call、`outputTokens=16`），仓库与 dsh 全部包内零命中，事件库 `共同记忆` 0 条；同段还伴随 `...` 式退化回复与 `inputTokens` 逼近 32k。统计 `open` 27→28、`fixed` 15→16、合计 61→63。**同时记下一条通用教训：工具输出只测失败路径，会漏掉成功路径** |
 | 2026-11-06 | v1.15 | 新增 **ISS-060**（每轮重复追加整份人格快照：22 轮 22 份 / 40,046 字符 / 占全会话 84%；第 19 轮越过 33024 → llama.cpp 静默丢一半，turn 20 `inputTokens` 32226→15771）；**更正 ISS-059 的 `...` 归因**——21 个 `turn/end` 全为 `completed`、无一次 `max-tokens`，`...` 是她执行「别回复」指令的妥协，不再是"上下文退化"。统计 `open` 28→29、合计 63→64；优先级表 0 位换成 ISS-060 |
+| 2026-11-06 | v1.16 | 用户问「把要求记进库会不会影响后续聊天」，实测后新增 **ISS-061**（`persona_note` 写的 `inferred` 不带 `sourceEventIds` → 被 `traceableInferred` 全部拦掉，46 条事件里恰好这 1 条被拦，`persona_recall` 同路径也查不到 → **唯一主动记忆通道是死信**）、**ISS-062**（`stripMemoryFact` 实测放行「说的时候不用回复」「用户希望我以后回复短一点」，只拦「你要多关心我」→ 闸门只判句式不判意图；现状安全纯属被 ISS-061 碰巧挡住，显著性算得 0.449 会进近因槽）、**ISS-063**（自我表达 `topic` 取信号词后 6 字切片，库里出现 `承诺-的` / `立场-在根据你说的` 这类残句标签并进入注入行）。统计 `open` 29→32、合计 64→67 |
